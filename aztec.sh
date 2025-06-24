@@ -13,7 +13,7 @@ MIN_COMPOSE_VERSION="1.29.2"
 AZTEC_CLI_URL="https://install.aztec.network"
 AZTEC_DIR="/root/aztec"
 DATA_DIR="/root/.aztec/alpha-testnet/data"
-AZTEC_IMAGE="aztecprotocol/aztec:0.87.2"
+AZTEC_IMAGE="aztecprotocol/aztec:0.87.9"
 
 # 函数：打印信息
 print_info() {
@@ -103,7 +103,7 @@ install_nodejs() {
 # 检查 Aztec 镜像版本
 check_aztec_image_version() {
   print_info "检查当前 Aztec 镜像版本..."
-  if docker images "$AZTEC_IMAGE" | grep -q "0.87.2"; then
+  if docker images "$AZTEC_IMAGE" | grep -q "0.87.9"; then
     print_info "Aztec 镜像 $AZTEC_IMAGE 已存在。"
   else
     print_info "拉取最新 Aztec 镜像 $AZTEC_IMAGE..."
@@ -448,6 +448,73 @@ register_validator() {
   read -n 1
 }
 
+# 删除 Docker 容器和节点数据
+delete_docker_and_node() {
+  print_info "=== 删除 Docker 容器和节点数据 ==="
+
+  read -p "警告：此操作将停止并删除 Aztec 容器、配置文件和所有节点数据，且无法恢复。是否继续？(y/n): " confirm
+  if [[ "$confirm" != "y" ]]; then
+    print_info "已取消删除操作。"
+    echo "按任意键返回主菜单..."
+    read -n 1
+    return
+  fi
+
+  # 停止并删除容器
+  print_info "停止并删除 Aztec 容器..."
+  if docker ps -q -f name=aztec-sequencer | grep -q .; then
+    docker stop aztec-sequencer 2>/dev/null || true
+    docker rm aztec-sequencer 2>/dev/null || true
+    print_info "容器 aztec-sequencer 已停止并删除。"
+  else
+    print_info "未找到运行中的 aztec-sequencer 容器。"
+  fi
+
+  # 删除 Docker 镜像
+  print_info "删除 Aztec 镜像 $AZTEC_IMAGE （所有版本）..."
+  if docker images -q "aztecprotocol/aztec" | sort -u | grep -q .; then
+    docker rmi $(docker images -q "aztecprotocol/aztec" | sort -u) 2>/dev/null || true
+    print_info "所有 aztecprotocol/aztec 镜像已删除。"
+  else
+    print_info "未找到 aztecprotocol/aztec 镜像。"
+  fi
+
+  # 删除配置文件和数据
+  print_info "删除配置文件和数据目录..."
+  if [ -d "$AZTEC_DIR" ]; then
+    rm -rf "$AZTEC_DIR"
+    print_info "配置文件目录 $AZTEC_DIR 已删除。"
+  else
+    print_info "未找到 $AZTEC_DIR 目录。"
+  fi
+
+  if [ -d "$DATA_DIR" ]; then
+    rm -rf "$DATA_DIR"
+    print_info "数据目录 $DATA_DIR 已删除。"
+  else
+    print_info "未找到 $DATA_DIR 目录。"
+  fi
+
+  # 清理临时世界状态数据库
+  print_info "清理临时世界状态数据库..."
+  rm -rf /tmp/aztec-world-state-* 2>/dev/null || true
+  print_info "临时世界状态数据库已清理。"
+
+  # 删除 Aztec CLI
+  print_info "删除 Aztec CLI..."
+  if [ -d "$HOME/.aztec" ]; then
+    rm -rf "$HOME/.aztec"
+    print_info "Aztec CLI 目录 $HOME/.aztec 已删除。"
+  else
+    print_info "未找到 $HOME/.aztec 目录。"
+  fi
+
+  print_info "所有 Docker 容器、镜像、配置文件和节点数据已删除。"
+  print_info "如果需要重新部署，请选择菜单选项 1 安装并启动节点。"
+  echo "按任意键返回主菜单..."
+  read -n 1
+}
+
 # 主菜单函数
 main_menu() {
   while true; do
@@ -462,8 +529,9 @@ main_menu() {
     echo "3. 获取区块高度和同步证明（请等待半个小时后再查询）"
     echo "4. 停止并重启节点"
     echo "5. 注册验证者"
-    echo "6. 退出"
-    read -p "请输入选项 (1-6): " choice
+    echo "6. 删除 Docker 容器和节点数据"
+    echo "7. 退出"
+    read -p "请输入选项 (1-7): " choice
 
     case $choice in
       1)
@@ -473,19 +541,19 @@ main_menu() {
         ;;
       2)
         if [ -f "$AZTEC_DIR/docker-compose.yml" ]; then
-          print_info "查看节点日志（最近 100 行，实时更新）..."
+          print_info "查看节点日志（最近 100 条，实时更新）..."
           docker logs --tail 100 aztec-sequencer > /tmp/aztec_logs.txt 2>/dev/null
-          if grep -q "does not match the expected genesis archive tree root" /tmp/aztec_logs.txt; then
+          if grep -q "does not match the expected genesis archive" /tmp/aztec_logs.txt; then
             print_info "检测到错误：创世归档树根不匹配！"
             print_info "建议：1. 确保使用最新镜像 $AZTEC_IMAGE"
             print_info "      2. 清理旧数据：rm -rf /tmp/aztec-world-state-* $DATA_DIR"
             print_info "      3. 重新运行 aztec-up alpha-testnet 和 aztec start"
             print_info "      4. 检查 L1 RPC URL 是否正确（Sepolia 网络）"
-            print_info "      5. 联系 Aztec Discord 社区寻求帮助"
+            print_info "      5. 联系 Aztec 社区寻求帮助"
           fi
           docker logs -f --tail 100 aztec-sequencer
         else
-          print_info "错误：未找到 $AZTEC_DIR/docker-compose.yml 文件，请先安装并启动节点。"
+          print_info "错误：未找到 $AZTEC_DIR/docker-compose.yml 文件夹，请先运行并启动节点..."
         fi
         echo "按任意键返回主菜单..."
         read -n 1
@@ -500,11 +568,14 @@ main_menu() {
         register_validator
         ;;
       6)
+        delete_docker_and_node
+        ;;
+      7)
         print_info "退出脚本..."
         exit 0
         ;;
       *)
-        print_info "无效选项，请输入 1-6。"
+        print_info "无效输入选项，请重新输入 1-7..."
         echo "按任意键返回主菜单..."
         read -n 1
         ;;
