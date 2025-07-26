@@ -346,6 +346,82 @@ stop_and_restart_node() {
   read -n 1
 }
 
+# 停止、更新镜像并重启节点
+update_and_restart_node() {
+  print_info "=== 停止、更新镜像并重启 Aztec 节点 ==="
+
+  read -p "警告：此操作将停止当前节点并尝试拉取最新镜像，是否继续？(y/n): " confirm
+  if [[ "$confirm" != "y" ]]; then
+    print_info "已取消更新操作。"
+    echo "按任意键返回主菜单..."
+    read -n 1
+    return
+  fi
+
+  # 检查配置目录是否存在
+  if [ ! -f "$AZTEC_DIR/docker-compose.yml" ]; then
+    print_info "错误：未找到 $AZTEC_DIR/docker-compose.yml 文件，请先安装并启动节点。"
+    echo "按任意键返回主菜单..."
+    read -n 1
+    return
+  fi
+
+  # 停止当前容器
+  print_info "停止 Aztec 节点..."
+  cd "$AZTEC_DIR"
+  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    docker compose down 2>/dev/null || true
+  elif command -v docker-compose >/dev/null 2>&1; then
+    docker-compose down 2>/dev/null || true
+  else
+    echo "错误：未找到 docker compose 或 docker-compose，请确保安装 Docker 和 Docker Compose。"
+    echo "按任意键返回主菜单..."
+    read -n 1
+    return
+  fi
+  print_info "节点已停止。"
+
+  # 更新 Aztec 镜像
+  print_info "检查并拉取最新 Aztec 镜像 $AZTEC_IMAGE..."
+  if ! docker pull "$AZTEC_IMAGE"; then
+    echo "错误：无法拉取镜像 $AZTEC_IMAGE，请检查网络或 Docker 配置。"
+    echo "按任意键返回主菜单..."
+    read -n 1
+    return
+  fi
+  print_info "Aztec 镜像已更新到最新版本。"
+
+  # 重启节点
+  print_info "重启 Aztec 节点..."
+  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    if ! docker compose up -d; then
+      echo "错误：docker compose up -d 失败，请检查 Docker 安装或配置。"
+      echo "查看日志：docker logs -f aztec-sequencer"
+      echo "按任意键返回主菜单..."
+      read -n 1
+      return
+    fi
+  elif command -v docker-compose >/dev/null 2>&1; then
+    if ! docker-compose up -d; then
+      echo "错误：docker-compose up -d 失败，请检查 Docker Compose 安装或配置。"
+      echo "查看日志：docker logs -f aztec-sequencer"
+      echo "按任意键返回主菜单..."
+      read -n 1
+      return
+    fi
+  else
+    echo "错误：未找到 docker compose 或 docker-compose，请确保安装 Docker 和 Docker Compose。"
+    echo "按任意键返回主菜单..."
+    read -n 1
+    return
+  fi
+
+  print_info "节点已更新并重启完成！"
+  print_info "查看日志：docker logs -f aztec-sequencer"
+  echo "按任意键返回主菜单..."
+  read -n 1
+}
+
 # 获取区块高度和同步证明
 get_block_and_proof() {
   if ! check_command jq; then
@@ -528,10 +604,11 @@ main_menu() {
     echo "2. 查看节点日志"
     echo "3. 获取区块高度和同步证明（请等待半个小时后再查询）"
     echo "4. 停止并重启节点"
-    echo "5. 注册验证者"
-    echo "6. 删除 Docker 容器和节点数据"
-    echo "7. 退出"
-    read -p "请输入选项 (1-7): " choice
+    echo "5. 停止并更新节点后重启节点"
+    echo "6. 注册验证者"
+    echo "7. 删除 Docker 容器和节点数据"
+    echo "8. 退出"
+    read -p "请输入选项 (1-8): " choice
 
     case $choice in
       1)
@@ -565,17 +642,20 @@ main_menu() {
         stop_and_restart_node
         ;;
       5)
-        register_validator
+        update_and_restart_node
         ;;
       6)
-        delete_docker_and_node
+        register_validator
         ;;
       7)
+        delete_docker_and_node
+        ;;
+      8)
         print_info "退出脚本..."
         exit 0
         ;;
       *)
-        print_info "无效输入选项，请重新输入 1-7..."
+        print_info "无效输入选项，请重新输入 1-8..."
         echo "按任意键返回主菜单..."
         read -n 1
         ;;
