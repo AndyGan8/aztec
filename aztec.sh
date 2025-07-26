@@ -155,6 +155,7 @@ validate_address() {
 # 验证私钥格式
 validate_private_key() {
   local key=$1
+  local name=$2
   if [[ ! "$key" =~ ^0x[a-fA-F0-9]{64}$ ]]; then
     echo "错误：$name 格式无效，必须是 0x 开头的 64 位十六进制。"
     exit 1
@@ -344,46 +345,13 @@ EOF
   print_info "  - 数据目录：$DATA_DIR"
 }
 
-# 停止并重启节点
-stop_and_restart_node() {
-  print_info "停止并重启 Aztec 节点..."
-  cd "$AZTEC_DIR"
-  if [ -f "$AZTEC_DIR/docker-compose.yml" ]; then
-    if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-      docker compose down 2>/dev/null || true
-      check_aztec_image_version
-      if ! docker compose up -d; then
-        echo "错误：docker compose up -d 失败，请检查 Docker 安装或配置。"
-        echo "查看日志：docker logs -f aztec-sequencer"
-        exit 1
-      fi
-    elif command -v docker-compose >/dev/null 2>&1; then
-      docker-compose down 2>/dev/null || true
-      check_aztec_image_version
-      if ! docker-compose up -d; then
-        echo "错误：docker-compose up -d 失败，请检查 Docker Compose 安装或配置。"
-        echo "查看日志：docker logs -f aztec-sequencer"
-        exit 1
-      fi
-    else
-      echo "错误：未找到 docker compose 或 docker-compose，请确保安装 Docker 和 Docker Compose。"
-      exit 1
-    fi
-    print_info "节点已重启，查看日志：docker logs -f aztec-sequencer"
-  else
-    print_info "错误：未找到 $AZTEC_DIR/docker-compose.yml 文件，请先安装并启动节点。"
-  fi
-  echo "按任意键返回主菜单..."
-  read -n 1
-}
+# 停止、删除 Docker、更新节点并重新创建 Docker
+stop_delete_update_restart_node() {
+  print_info "=== 停止节点、删除 Docker 容器、更新节点并重新创建 Docker ==="
 
-# 停止、更新镜像并重启节点
-update_and_restart_node() {
-  print_info "=== 停止、更新镜像并重启 Aztec 节点 ==="
-
-  read -p "警告：此操作将停止当前节点并尝试拉取最新镜像，是否继续？(y/n): " confirm
+  read -p "警告：此操作将停止并删除 Aztec 容器、拉取最新镜像、更新节点并重新创建 Docker，是否继续？(y/n): " confirm
   if [[ "$confirm" != "y" ]]; then
-    print_info "已取消更新操作。"
+    print_info "已取消操作。"
     echo "按任意键返回主菜单..."
     read -n 1
     return
@@ -397,20 +365,15 @@ update_and_restart_node() {
     return
   fi
 
-  # 停止当前容器
-  print_info "停止 Aztec 节点..."
-  cd "$AZTEC_DIR"
-  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-    docker compose down 2>/dev/null || true
-  elif command -v docker-compose >/dev/null 2>&1; then
-    docker-compose down 2>/dev/null || true
+  # 停止并删除容器
+  print_info "停止并删除 Aztec 容器..."
+  if docker ps -q -f name=aztec-sequencer | grep -q .; then
+    docker stop aztec-sequencer 2>/dev/null || true
+    docker rm aztec-sequencer 2>/dev/null || true
+    print_info "容器 aztec-sequencer 已停止并删除。"
   else
-    echo "错误：未找到 docker compose 或 docker-compose，请确保安装 Docker 和 Docker Compose。"
-    echo "按任意键返回主菜单..."
-    read -n 1
-    return
+    print_info "未找到运行中的 aztec-sequencer 容器。"
   fi
-  print_info "节点已停止。"
 
   # 更新 Aztec CLI
   print_info "更新 Aztec CLI 到 1.1.2..."
@@ -437,8 +400,9 @@ update_and_restart_node() {
   fi
   print_info "Aztec 镜像已更新到最新版本。"
 
-  # 重启节点
-  print_info "重启 Aztec 节点..."
+  # 重新创建并启动节点
+  print_info "重新创建并启动 Aztec 节点..."
+  cd "$AZTEC_DIR"
   if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
     if ! docker compose up -d; then
       echo "错误：docker compose up -d 失败，请检查 Docker 安装或配置。"
@@ -462,7 +426,7 @@ update_and_restart_node() {
     return
   fi
 
-  print_info "节点已更新并重启完成！"
+  print_info "节点已停止、删除、更新并重新创建完成！"
   print_info "查看日志：docker logs -f aztec-sequencer"
   echo "按任意键返回主菜单..."
   read -n 1
@@ -649,12 +613,11 @@ main_menu() {
     echo "1. 安装并启动 Aztec 节点"
     echo "2. 查看节点日志"
     echo "3. 获取区块高度和同步证明（请等待半个小时后再查询）"
-    echo "4. 停止并重启节点"
-    echo "5. 停止并更新节点后重启节点"
-    echo "6. 注册验证者"
-    echo "7. 删除 Docker 容器和节点数据"
-    echo "8. 退出"
-    read -p "请输入选项 (1-8): " choice
+    echo "4. 停止节点、删除 Docker 容器、更新节点并重新创建 Docker"
+    echo "5. 注册验证者"
+    echo "6. 删除 Docker 容器和节点数据"
+    echo "7. 退出"
+    read -p "请输入选项 (1-7): " choice
 
     case $choice in
       1)
@@ -685,23 +648,20 @@ main_menu() {
         get_block_and_proof
         ;;
       4)
-        stop_and_restart_node
+        stop_delete_update_restart_node
         ;;
       5)
-        update_and_restart_node
-        ;;
-      6)
         register_validator
         ;;
-      7)
+      6)
         delete_docker_and_node
         ;;
-      8)
+      7)
         print_info "退出脚本..."
         exit 0
         ;;
       *)
-        print_info "无效输入选项，请重新输入 1-8..."
+        print_info "无效输入选项，请重新输入 1-7..."
         echo "按任意键返回主菜单..."
         read -n 1
         ;;
