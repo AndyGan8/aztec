@@ -126,8 +126,8 @@ install_aztec_cli() {
     echo "Aztec CLI 安装失败，未找到 aztec-up 命令。"
     exit 1
   fi
-  if ! aztec-up alpha-testnet; then
-    echo "错误：aztec-up alpha-testnet 命令执行失败，请检查网络或 Aztec CLI 安装。"
+  if ! aztec-up alpha-testnet 1.1.2; then
+    echo "错误：aztec-up alpha-testnet 1.1.2 命令执行失败，请检查网络或 Aztec CLI 安装。"
     exit 1
   fi
 }
@@ -156,9 +156,22 @@ validate_address() {
 validate_private_key() {
   local key=$1
   if [[ ! "$key" =~ ^0x[a-fA-F0-9]{64}$ ]]; then
-    echo "错误：验证者私钥格式无效，必须是 0x 开头的 64 位十六进制。"
+    echo "错误：$name 格式无效，必须是 0x 开头的 64 位十六进制。"
     exit 1
   fi
+}
+
+# 验证多个私钥格式（以逗号分隔）
+validate_private_keys() {
+  local keys=$1
+  local name=$2
+  IFS=',' read -ra key_array <<< "$keys"
+  for key in "${key_array[@]}"; do
+    if [[ ! "$key" =~ ^0x[a-fA-F0-9]{64}$ ]]; then
+      echo "错误：$name 中包含无效私钥 '$key'，必须是 0x 开头的 64 位十六进制。"
+      exit 1
+    fi
+  done
 }
 
 # 主逻辑：安装和启动 Aztec 节点
@@ -194,8 +207,9 @@ install_and_start_node() {
   # 获取用户输入（支持环境变量覆盖）
   ETH_RPC="${ETH_RPC:-}"
   CONS_RPC="${CONS_RPC:-}"
-  VALIDATOR_PRIVATE_KEY="${VALIDATOR_PRIVATE_KEY:-}"
+  VALIDATOR_PRIVATE_KEYS="${VALIDATOR_PRIVATE_KEYS:-}"
   COINBASE="${COINBASE:-}"
+  PUBLISHER_PRIVATE_KEY="${PUBLISHER_PRIVATE_KEY:-}"
   print_info "获取 RPC URL 和其他配置的说明："
   print_info "  - L1 执行客户端（EL）RPC URL："
   print_info "    1. 在 https://dashboard.alchemy.com/ 获取 Sepolia 的 RPC (http://xxx)"
@@ -205,29 +219,37 @@ install_and_start_node() {
   print_info ""
   print_info "  - COINBASE：接收奖励的以太坊地址（格式：0x...）"
   print_info ""
+  print_info "  - 验证者私钥：支持多个私钥，用逗号分隔（格式：0x123...,0x234...）"
+  print_info ""
+  print_info "  - 发布者私钥（可选）：用于提交交易的地址，仅需为此地址充值 Sepolia ETH"
+  print_info ""
   if [ -z "$ETH_RPC" ]; then
     read -p " L1 执行客户端（EL）RPC URL： " ETH_RPC
   fi
   if [ -z "$CONS_RPC" ]; then
     read -p " L1 共识（CL）RPC URL： " CONS_RPC
   fi
-  if [ -z "$VALIDATOR_PRIVATE_KEY" ]; then
-    read -p " 验证者私钥（0x 开头的 64 位十六进制）： " VALIDATOR_PRIVATE_KEY
+  if [ -z "$VALIDATOR_PRIVATE_KEYS" ]; then
+    read -p " 验证者私钥（多个私钥用逗号分隔，0x 开头）： " VALIDATOR_PRIVATE_KEYS
   fi
   if [ -z "$COINBASE" ]; then
-    read -p " EVM钱包 地址（以太坊地址，0x 开头）： " COINBASE
+    read -p " EVM钱包地址（以太坊地址，0x 开头）： " COINBASE
   fi
+  read -p " 发布者私钥（可选，0x 开头，按回车跳过）： " PUBLISHER_PRIVATE_KEY
   BLOB_URL="" # 默认跳过 Blob Sink URL
 
   # 验证输入
   validate_url "$ETH_RPC" "L1 执行客户端（EL）RPC URL"
   validate_url "$CONS_RPC" "L1 共识（CL）RPC URL"
-  if [ -z "$VALIDATOR_PRIVATE_KEY" ]; then
+  if [ -z "$VALIDATOR_PRIVATE_KEYS" ]; then
     echo "错误：验证者私钥不能为空。"
     exit 1
   fi
-  validate_private_key "$VALIDATOR_PRIVATE_KEY"
+  validate_private_keys "$VALIDATOR_PRIVATE_KEYS" "验证者私钥"
   validate_address "$COINBASE" "COINBASE 地址"
+  if [ -n "$PUBLISHER_PRIVATE_KEY" ]; then
+    validate_private_key "$PUBLISHER_PRIVATE_KEY" "发布者私钥"
+  fi
 
   # 获取公共 IP
   print_info "获取公共 IP..."
@@ -240,17 +262,25 @@ install_and_start_node() {
 ETHEREUM_HOSTS="$ETH_RPC"
 L1_CONSENSUS_HOST_URLS="$CONS_RPC"
 P2P_IP="$PUBLIC_IP"
-VALIDATOR_PRIVATE_KEY="$VALIDATOR_PRIVATE_KEY"
+VALIDATOR_PRIVATE_KEYS="$VALIDATOR_PRIVATE_KEYS"
 COINBASE="$COINBASE"
 DATA_DIRECTORY="/data"
 LOG_LEVEL="debug"
 EOF
+  if [ -n "$PUBLISHER_PRIVATE_KEY" ]; then
+    echo "PUBLISHER_PRIVATE_KEY=\"$PUBLISHER_PRIVATE_KEY\"" >> "$AZTEC_DIR/.env"
+  fi
   if [ -n "$BLOB_URL" ]; then
     echo "BLOB_SINK_URL=\"$BLOB_URL\"" >> "$AZTEC_DIR/.env"
   fi
   chmod 600 "$AZTEC_DIR/.env"
 
-  # 设置 BLOB_FLAG
+  # 设置启动标志
+  VALIDATOR_FLAG="--sequencer.validatorPrivateKeys \$VALIDATOR_PRIVATE_KEYS"
+  PUBLISHER_FLAG=""
+  if [ -n "$PUBLISHER_PRIVATE_KEY" ]; then
+    PUBLISHER_FLAG="--sequencer.publisherPrivateKey \$PUBLISHER_PRIVATE_KEY"
+  fi
   BLOB_FLAG=""
   if [ -n "$BLOB_URL" ]; then
     BLOB_FLAG="--sequencer.blobSinkUrl \$BLOB_SINK_URL"
@@ -269,13 +299,14 @@ services:
       - ETHEREUM_HOSTS=\${ETHEREUM_HOSTS}
       - L1_CONSENSUS_HOST_URLS=\${L1_CONSENSUS_HOST_URLS}
       - P2P_IP=\${P2P_IP}
-      - VALIDATOR_PRIVATE_KEY=\${VALIDATOR_PRIVATE_KEY}
+      - VALIDATOR_PRIVATE_KEYS=\${VALIDATOR_PRIVATE_KEYS}
       - COINBASE=\${COINBASE}
       - DATA_DIRECTORY=\${DATA_DIRECTORY}
       - LOG_LEVEL=\${LOG_LEVEL}
+      - PUBLISHER_PRIVATE_KEY=\${PUBLISHER_PRIVATE_KEY:-}
       - BLOB_SINK_URL=\${BLOB_SINK_URL:-}
     entrypoint: >
-      sh -c "node --no-warnings /usr/src/yarn-project/aztec/dest/bin/index.js start --network alpha-testnet --node --archiver --sequencer \${BLOB_FLAG:-}"
+      sh -c "node --no-warnings /usr/src/yarn-project/aztec/dest/bin/index.js start --network alpha-testnet --node --archiver --sequencer $VALIDATOR_FLAG $PUBLISHER_FLAG \${BLOB_FLAG:-}"
     volumes:
       - /root/.aztec/alpha-testnet/data/:/data
 EOF
@@ -380,6 +411,21 @@ update_and_restart_node() {
     return
   fi
   print_info "节点已停止。"
+
+  # 更新 Aztec CLI
+  print_info "更新 Aztec CLI 到 1.1.2..."
+  export PATH="$HOME/.aztec/bin:$PATH"
+  if ! check_command aztec-up; then
+    echo "错误：未找到 aztec-up 命令，正在尝试重新安装 Aztec CLI..."
+    install_aztec_cli
+  else
+    if ! aztec-up alpha-testnet 1.1.2; then
+      echo "错误：aztec-up alpha-testnet 1.1.2 失败，请检查网络或 Aztec CLI 安装。"
+      echo "按任意键返回主菜单..."
+      read -n 1
+      return
+    fi
+  fi
 
   # 更新 Aztec 镜像
   print_info "检查并拉取最新 Aztec 镜像 $AZTEC_IMAGE..."
@@ -488,11 +534,11 @@ register_validator() {
   fi
 
   read -p "请输入以太坊私钥（0x...）： " L1_PRIVATE_KEY
-  read -p "请输入钱包地址： " VALIDATOR_ADDRESS
+  read -p "请输入验证者地址（0x...）： " VALIDATOR_ADDRESS
   read -p "请输入 L1 RPC 地址： " L1_RPC
 
   # 验证输入
-  validate_private_key "$L1_PRIVATE_KEY"
+  validate_private_key "$L1_PRIVATE_KEY" "以太坊私钥"
   validate_address "$VALIDATOR_ADDRESS" "验证者地址"
   validate_url "$L1_RPC" "L1 RPC 地址"
 
@@ -630,7 +676,7 @@ main_menu() {
           fi
           docker logs -f --tail 100 aztec-sequencer
         else
-          print_info "错误：未找到 $AZTEC_DIR/docker-compose.yml 文件夹，请先运行并启动节点..."
+          print_info "错误：未找到 $AZTEC_DIR/docker-compose.yml 文件，请先运行并启动节点..."
         fi
         echo "按任意键返回主菜单..."
         read -n 1
