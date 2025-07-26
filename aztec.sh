@@ -634,7 +634,7 @@ main_menu() {
     echo "1. 安装并启动 Aztec 节点"
     echo "2. 查看节点日志"
     echo "3. 获取区块高度和同步证明（请等待半个小时后再查询）"
-    echo "4. 停止节点、删除 Docker 容器（包括 $OLD_AZTEC_IMAGE）、更新节点并重新创建 Docker"
+    echo "4. 停止节点、删除 Docker 容器、更新节点并重新创建 Docker"
     echo "5. 注册验证者"
     echo "6. 删除 Docker 容器和节点数据"
     echo "7. 退出"
