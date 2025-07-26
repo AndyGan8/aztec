@@ -350,7 +350,7 @@ EOF
 stop_delete_update_restart_node() {
   print_info "=== 停止节点、删除 Docker 容器（包括 $OLD_AZTEC_IMAGE）、更新节点并重新创建 Docker ==="
 
-  read -p "警告：此操作将停止并删除 Aztec 容器（包括 $OLD_AZTEC_IMAGE）、拉取最新镜像 $AZTEC_IMAGE、更新节点并重新创建 Docker，是否继续？(y/n): " confirm
+  read -p "警告：此操作将停止并删除 Aztec 容器（包括 $OLD_AZTEC_IMAGE）、更新 docker-compose.yml 到 $AZTEC_IMAGE、拉取最新镜像并重新创建 Docker，是否继续？(y/n): " confirm
   if [[ "$confirm" != "y" ]]; then
     print_info "已取消操作。"
     echo "按任意键返回主菜单..."
@@ -364,6 +364,17 @@ stop_delete_update_restart_node() {
     echo "按任意键返回主菜单..."
     read -n 1
     return
+  fi
+
+  # 检查并更新 docker-compose.yml 中的镜像版本
+  if grep -q "image: $OLD_AZTEC_IMAGE" "$AZTEC_DIR/docker-compose.yml"; then
+    print_info "检测到 docker-compose.yml 使用旧镜像 $OLD_AZTEC_IMAGE，正在更新为 $AZTEC_IMAGE..."
+    sed -i "s|image: $OLD_AZTEC_IMAGE|image: $AZTEC_IMAGE|" "$AZTEC_DIR/docker-compose.yml"
+    print_info "docker-compose.yml 已更新为 $AZTEC_IMAGE。"
+  elif grep -q "image: $AZTEC_IMAGE" "$AZTEC_DIR/docker-compose.yml"; then
+    print_info "docker-compose.yml 已使用最新镜像 $AZTEC_IMAGE，无需更新。"
+  else
+    print_info "警告：docker-compose.yml 包含未知镜像版本，建议重新运行选项 1 重新生成配置。"
   fi
 
   # 停止并删除容器
