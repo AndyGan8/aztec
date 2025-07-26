@@ -14,6 +14,7 @@ AZTEC_CLI_URL="https://install.aztec.network"
 AZTEC_DIR="/root/aztec"
 DATA_DIR="/root/.aztec/alpha-testnet/data"
 AZTEC_IMAGE="aztecprotocol/aztec:1.1.2"
+OLD_AZTEC_IMAGE="aztecprotocol/aztec:0.87.9"
 
 # 函数：打印信息
 print_info() {
@@ -345,11 +346,11 @@ EOF
   print_info "  - 数据目录：$DATA_DIR"
 }
 
-# 停止、删除 Docker、更新节点并重新创建 Docker
+# 停止、删除 Docker（包括旧版本）、更新节点并重新创建 Docker
 stop_delete_update_restart_node() {
-  print_info "=== 停止节点、删除 Docker 容器、更新节点并重新创建 Docker ==="
+  print_info "=== 停止节点、删除 Docker 容器（包括 $OLD_AZTEC_IMAGE）、更新节点并重新创建 Docker ==="
 
-  read -p "警告：此操作将停止并删除 Aztec 容器、拉取最新镜像、更新节点并重新创建 Docker，是否继续？(y/n): " confirm
+  read -p "警告：此操作将停止并删除 Aztec 容器（包括 $OLD_AZTEC_IMAGE）、拉取最新镜像 $AZTEC_IMAGE、更新节点并重新创建 Docker，是否继续？(y/n): " confirm
   if [[ "$confirm" != "y" ]]; then
     print_info "已取消操作。"
     echo "按任意键返回主菜单..."
@@ -375,6 +376,15 @@ stop_delete_update_restart_node() {
     print_info "未找到运行中的 aztec-sequencer 容器。"
   fi
 
+  # 删除旧版本镜像 aztecprotocol/aztec:0.87.9
+  print_info "删除旧版本 Aztec 镜像 $OLD_AZTEC_IMAGE..."
+  if docker images -q "$OLD_AZTEC_IMAGE" | grep -q .; then
+    docker rmi "$OLD_AZTEC_IMAGE" 2>/dev/null || true
+    print_info "旧版本镜像 $OLD_AZTEC_IMAGE 已删除。"
+  else
+    print_info "未找到旧版本镜像 $OLD_AZTEC_IMAGE。"
+  fi
+
   # 更新 Aztec CLI
   print_info "更新 Aztec CLI 到 1.1.2..."
   export PATH="$HOME/.aztec/bin:$PATH"
@@ -398,7 +408,7 @@ stop_delete_update_restart_node() {
     read -n 1
     return
   fi
-  print_info "Aztec 镜像已更新到最新版本。"
+  print_info "Aztec 镜像已更新到最新版本 $AZTEC_IMAGE。"
 
   # 重新创建并启动节点
   print_info "重新创建并启动 Aztec 节点..."
@@ -557,10 +567,10 @@ delete_docker_and_node() {
   fi
 
   # 删除 Docker 镜像
-  print_info "删除 Aztec 镜像 $AZTEC_IMAGE （所有版本）..."
+  print_info "删除 Aztec 镜像 $AZTEC_IMAGE 和 $OLD_AZTEC_IMAGE..."
   if docker images -q "aztecprotocol/aztec" | sort -u | grep -q .; then
     docker rmi $(docker images -q "aztecprotocol/aztec" | sort -u) 2>/dev/null || true
-    print_info "所有 aztecprotocol/aztec 镜像已删除。"
+    print_info "所有 aztecprotocol/aztec 镜像（包括 $AZTEC_IMAGE 和 $OLD_AZTEC_IMAGE）已删除。"
   else
     print_info "未找到 aztecprotocol/aztec 镜像。"
   fi
@@ -613,7 +623,7 @@ main_menu() {
     echo "1. 安装并启动 Aztec 节点"
     echo "2. 查看节点日志"
     echo "3. 获取区块高度和同步证明（请等待半个小时后再查询）"
-    echo "4. 停止节点、删除 Docker 容器、更新节点并重新创建 Docker"
+    echo "4. 停止节点、删除 Docker 容器（包括 $OLD_AZTEC_IMAGE）、更新节点并重新创建 Docker"
     echo "5. 注册验证者"
     echo "6. 删除 Docker 容器和节点数据"
     echo "7. 退出"
