@@ -13,7 +13,7 @@ MIN_COMPOSE_VERSION="1.29.2"
 AZTEC_CLI_URL="https://install.aztec.network"
 AZTEC_DIR="/root/aztec"
 DATA_DIR="/root/.aztec/alpha-testnet/data"
-AZTEC_IMAGE="aztecprotocol/aztec:0.87.9"
+AZTEC_IMAGE="aztecprotocol/aztec:1.1.2"
 
 # 函数：打印信息
 print_info() {
@@ -103,7 +103,7 @@ install_nodejs() {
 # 检查 Aztec 镜像版本
 check_aztec_image_version() {
   print_info "检查当前 Aztec 镜像版本..."
-  if docker images "$AZTEC_IMAGE" | grep -q "0.87.9"; then
+  if docker images "$AZTEC_IMAGE" | grep -q "1.1.2"; then
     print_info "Aztec 镜像 $AZTEC_IMAGE 已存在。"
   else
     print_info "拉取最新 Aztec 镜像 $AZTEC_IMAGE..."
