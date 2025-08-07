@@ -13,8 +13,8 @@ MIN_COMPOSE_VERSION="1.29.2"
 AZTEC_CLI_URL="https://install.aztec.network"
 AZTEC_DIR="/root/aztec"
 DATA_DIR="/root/.aztec/alpha-testnet/data"
-AZTEC_IMAGE="aztecprotocol/aztec:1.2.0"  # 更新为 1.2.0
-OLD_AZTEC_IMAGE="aztecprotocol/aztec:1.1.2"  # 旧版本为 1.1.2
+AZTEC_IMAGE="aztecprotocol/aztec:1.2.1"  # 更新为 1.2.1
+OLD_AZTEC_IMAGE="aztecprotocol/aztec:1.2.0"  # 旧版本为 1.2.0
 
 # 函数：打印信息
 print_info() {
@@ -104,7 +104,7 @@ install_nodejs() {
 # 检查 Aztec 镜像版本
 check_aztec_image_version() {
   print_info "检查当前 Aztec 镜像版本..."
-  if docker images "$AZTEC_IMAGE" | grep -q "1.2.0"; then
+  if docker images "$AZTEC_IMAGE" | grep -q "1.2.1"; then  # 更新为检查 1.2.1
     print_info "Aztec 镜像 $AZTEC_IMAGE 已存在。"
   else
     print_info "拉取最新 Aztec 镜像 $AZTEC_IMAGE..."
@@ -127,8 +127,8 @@ install_aztec_cli() {
     echo "Aztec CLI 安装失败，未找到 aztec-up 命令。"
     exit 1
   fi
-  if ! aztec-up alpha-testnet 1.2.0; then  # 更新为 1.2.0
-    echo "错误：aztec-up alpha-testnet 1.2.0 命令执行失败，请检查网络或 Aztec CLI 安装。"
+  if ! aztec-up alpha-testnet 1.2.1; then  # 更新为 1.2.1
+    echo "错误：aztec-up alpha-testnet 1.2.1 命令执行失败，请检查网络或 Aztec CLI 安装。"
     exit 1
   fi
 }
@@ -387,7 +387,7 @@ stop_delete_update_restart_node() {
     print_info "未找到运行中的 aztec-sequencer 容器。"
   fi
 
-  # 删除旧版本镜像 aztecprotocol/aztec:1.1.2
+  # 删除旧版本镜像 aztecprotocol/aztec:1.2.0
   print_info "删除旧版本 Aztec 镜像 $OLD_AZTEC_IMAGE..."
   if docker images -q "$OLD_AZTEC_IMAGE" | grep -q .; then
     docker rmi "$OLD_AZTEC_IMAGE" 2>/dev/null || true
@@ -397,14 +397,14 @@ stop_delete_update_restart_node() {
   fi
 
   # 更新 Aztec CLI
-  print_info "更新 Aztec CLI 到 1.2.0..."
+  print_info "更新 Aztec CLI 到 1.2.1..."
   export PATH="$HOME/.aztec/bin:$PATH"
   if ! check_command aztec-up; then
     echo "错误：未找到 aztec-up 命令，正在尝试重新安装 Aztec CLI..."
     install_aztec_cli
   else
-    if ! aztec-up alpha-testnet 1.2.0; then
-      echo "错误：aztec-up alpha-testnet 1.2.0 失败，请检查网络或 Aztec CLI 安装。"
+    if ! aztec-up alpha-testnet 1.2.1; then  # 更新为 1.2.1
+      echo "错误：aztec-up alpha-testnet 1.2.1 失败，请检查网络或 Aztec CLI 安装。"
       echo "按任意键返回主菜单..."
       read -n 1
       return
