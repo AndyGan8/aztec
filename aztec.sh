@@ -12,7 +12,7 @@ MIN_DOCKER_VERSION="20.10"
 MIN_COMPOSE_VERSION="1.29.2"
 AZTEC_CLI_URL="https://install.aztec.network"
 AZTEC_DIR="/root/aztec"
-DATA_DIR="/root/.aztec/testnet/data" # 更新为与 .yml 一致
+DATA_DIR="/root/.aztec/testnet/data"
 AZTEC_IMAGE="aztecprotocol/aztec:2.0.2"
 OLD_AZTEC_IMAGE="aztecprotocol/aztec:1.2.1"
 
@@ -104,7 +104,7 @@ install_nodejs() {
 # 检查 Aztec 镜像版本
 check_aztec_image_version() {
   print_info "检查当前 Aztec 镜像版本..."
-  if docker images "$AZTEC_IMAGE" | grep -q "2.0.2"; then # 更新为检查 2.0.2
+  if docker images "$AZTEC_IMAGE" | grep -q "2.0.2"; then
     print_info "Aztec 镜像 $AZTEC_IMAGE 已存在。"
   else
     print_info "拉取最新 Aztec 镜像 $AZTEC_IMAGE..."
@@ -119,17 +119,25 @@ check_aztec_image_version() {
 install_aztec_cli() {
   print_info "安装 Aztec CLI 并准备测试网..."
   if ! curl -sL "$AZTEC_CLI_URL" | bash; then
-    echo "Aztec CLI 安装失败。"
+    echo "错误：无法下载或执行 Aztec CLI 安装脚本，请检查网络或 URL ($AZTEC_CLI_URL)。"
     exit 1
   fi
   export PATH="$HOME/.aztec/bin:$PATH"
   if ! check_command aztec-up; then
-    echo "Aztec CLI 安装失败，未找到 aztec-up 命令。"
+    echo "错误：Aztec CLI 安装失败，未找到 aztec-up 命令。"
     exit 1
   fi
-  if ! aztec-up testnet 2.0.2; then # 更新为 testnet 和 2.0.2
-    echo "错误：aztec-up testnet 2.0.2 命令执行失败，请检查网络或 Aztec CLI 安装。"
-    exit 1
+  # 尝试安装 testnet 2.0.2，若失败则回退到 alpha-testnet 或不指定版本
+  print_info "尝试运行 aztec-up testnet 2.0.2..."
+  if ! aztec-up testnet 2.0.2; then
+    print_info "警告：aztec-up testnet 2.0.2 失败，尝试 alpha-testnet 2.0.2..."
+    if ! aztec-up alpha-testnet 2.0.2; then
+      print_info "警告：aztec-up alpha-testnet 2.0.2 也失败，尝试不指定版本..."
+      if ! aztec-up testnet; then
+        echo "错误：aztec-up testnet 失败，请检查网络、Aztec CLI 安装或参考 https://docs.aztec.network。"
+        exit 1
+      fi
+    fi
   fi
 }
 
@@ -212,8 +220,8 @@ install_and_start_node() {
   ufw status
 
   # 获取用户输入（支持环境变量覆盖）
-  ETH_RPC="${ETHEREUM_RPC_URL:-${ETH_RPC:-}}" # 优先使用 ETHEREUM_RPC_URL
-  CONS_RPC="${CONSENSUS_BEACON_URL:-${CONS_RPC:-}}" # 优先使用 CONSENSUS_BEACON_URL
+  ETH_RPC="${ETHEREUM_RPC_URL:-${ETH_RPC:-}}"
+  CONS_RPC="${CONSENSUS_BEACON_URL:-${CONS_RPC:-}}"
   VALIDATOR_PRIVATE_KEYS="${VALIDATOR_PRIVATE_KEYS:-}"
   COINBASE="${COINBASE:-}"
   P2P_IP="${P2P_IP:-}"
@@ -390,11 +398,17 @@ stop_delete_update_restart_node() {
     echo "错误：未找到 aztec-up 命令，正在尝试重新安装 Aztec CLI..."
     install_aztec_cli
   else
-    if ! aztec-up testnet 2.0.2; then # 更新为 testnet 和 2.0.2
-      echo "错误：aztec-up testnet 2.0.2 失败，请检查网络或 Aztec CLI 安装。"
-      echo "按任意键返回主菜单..."
-      read -n 1
-      return
+    if ! aztec-up testnet 2.0.2; then
+      print_info "警告：aztec-up testnet 2.0.2 失败，尝试 alpha-testnet 2.0.2..."
+      if ! aztec-up alpha-testnet 2.0.2; then
+        print_info "警告：aztec-up alpha-testnet 2.0.2 也失败，尝试不指定版本..."
+        if ! aztec-up testnet; then
+          echo "错误：aztec-up testnet 失败，请检查网络或 Aztec CLI 安装。"
+          echo "按任意键返回主菜单..."
+          read -n 1
+          return
+        fi
+      fi
     fi
   fi
 
@@ -623,7 +637,7 @@ main_menu() {
     echo "3. 获取区块高度和同步证明（请等待半个小时后再查询）"
     echo "4. 停止节点、删除 Docker 容器、更新节点并重新创建 Docker"
     echo "5. 注册验证者"
-    echo "6. 删除 Djokovic: 删除 Docker 容器和节点数据"
+    echo "6. 删除 Docker 容器和节点数据" # 修正 Djokovic 拼写错误
     echo "7. 退出"
     read -p "请输入选项 (1-7): " choice
 
