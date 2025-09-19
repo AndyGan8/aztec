@@ -12,9 +12,9 @@ MIN_DOCKER_VERSION="20.10"
 MIN_COMPOSE_VERSION="1.29.2"
 AZTEC_CLI_URL="https://install.aztec.network"
 AZTEC_DIR="/root/aztec"
-DATA_DIR="/root/.aztec/alpha-testnet/data"
-AZTEC_IMAGE="aztecprotocol/aztec:2.0.2"  # 更新为 2.0.2
-OLD_AZTEC_IMAGE="aztecprotocol/aztec:1.2.1"  # 旧版本为 1.2.1
+DATA_DIR="/root/.aztec/testnet/data" # 更新为与 .yml 一致
+AZTEC_IMAGE="aztecprotocol/aztec:2.0.2"
+OLD_AZTEC_IMAGE="aztecprotocol/aztec:1.2.1"
 
 # 函数：打印信息
 print_info() {
@@ -104,7 +104,7 @@ install_nodejs() {
 # 检查 Aztec 镜像版本
 check_aztec_image_version() {
   print_info "检查当前 Aztec 镜像版本..."
-  if docker images "$AZTEC_IMAGE" | grep -q "1.2.1"; then  # 更新为检查 1.2.1
+  if docker images "$AZTEC_IMAGE" | grep -q "2.0.2"; then # 更新为检查 2.0.2
     print_info "Aztec 镜像 $AZTEC_IMAGE 已存在。"
   else
     print_info "拉取最新 Aztec 镜像 $AZTEC_IMAGE..."
@@ -117,7 +117,7 @@ check_aztec_image_version() {
 
 # 安装 Aztec CLI
 install_aztec_cli() {
-  print_info "安装 Aztec CLI 并准备 alpha 测试网..."
+  print_info "安装 Aztec CLI 并准备测试网..."
   if ! curl -sL "$AZTEC_CLI_URL" | bash; then
     echo "Aztec CLI 安装失败。"
     exit 1
@@ -127,18 +127,23 @@ install_aztec_cli() {
     echo "Aztec CLI 安装失败，未找到 aztec-up 命令。"
     exit 1
   fi
-  if ! aztec-up alpha-testnet 1.2.1; then  # 更新为 1.2.1
-    echo "错误：aztec-up alpha-testnet 1.2.1 命令执行失败，请检查网络或 Aztec CLI 安装。"
+  if ! aztec-up testnet 2.0.2; then # 更新为 testnet 和 2.0.2
+    echo "错误：aztec-up testnet 2.0.2 命令执行失败，请检查网络或 Aztec CLI 安装。"
     exit 1
   fi
 }
 
-# 验证 RPC URL 格式
+# 验证 RPC URL 格式并测试连通性
 validate_url() {
   local url=$1
   local name=$2
   if [[ ! "$url" =~ ^https?:// ]]; then
     echo "错误：$name 格式无效，必须以 http:// 或 https:// 开头。"
+    exit 1
+  fi
+  print_info "测试 $name 连通性: $url..."
+  if ! curl -s -X POST -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' "$url" | grep -q '"result"'; then
+    echo "错误：无法连接到 $name ($url)，请检查 URL 是否正确或网络是否可达。"
     exit 1
   fi
 }
@@ -178,7 +183,7 @@ validate_private_keys() {
 
 # 主逻辑：安装和启动 Aztec 节点
 install_and_start_node() {
-  # 清理旧配置和 Hawkins
+  # 清理旧配置和数据
   print_info "清理旧的 Aztec 配置和数据（如果存在）..."
   rm -rf "$AZTEC_DIR/.env" "$AZTEC_DIR/docker-compose.yml"
   rm -rf /tmp/aztec-world-state-*  # 清理临时世界状态数据库
@@ -207,11 +212,11 @@ install_and_start_node() {
   ufw status
 
   # 获取用户输入（支持环境变量覆盖）
-  ETH_RPC="${ETH_RPC:-}"
-  CONS_RPC="${CONS_RPC:-}"
+  ETH_RPC="${ETHEREUM_RPC_URL:-${ETH_RPC:-}}" # 优先使用 ETHEREUM_RPC_URL
+  CONS_RPC="${CONSENSUS_BEACON_URL:-${CONS_RPC:-}}" # 优先使用 CONSENSUS_BEACON_URL
   VALIDATOR_PRIVATE_KEYS="${VALIDATOR_PRIVATE_KEYS:-}"
   COINBASE="${COINBASE:-}"
-  PUBLISHER_PRIVATE_KEY="${PUBLISHER_PRIVATE_KEY:-}"
+  P2P_IP="${P2P_IP:-}"
   print_info "获取 RPC URL 和其他配置的说明："
   print_info "  - L1 执行客户端（EL）RPC URL："
   print_info "    1. 在 https://dashboard.alchemy.com/ 获取 Sepolia 的 RPC (http://xxx)"
@@ -223,7 +228,7 @@ install_and_start_node() {
   print_info ""
   print_info "  - 验证者私钥：支持多个私钥，用逗号分隔（格式：0x123...,0x234...）"
   print_info ""
-  print_info "  - 发布者私钥（可选）：用于提交交易的地址，仅需为此地址充值 Sepolia ETH"
+  print_info "  - P2P_IP：节点的公共 IP 地址（自动获取或手动输入）"
   print_info ""
   if [ -z "$ETH_RPC" ]; then
     read -p " L1 执行客户端（EL）RPC URL： " ETH_RPC
@@ -237,8 +242,9 @@ install_and_start_node() {
   if [ -z "$COINBASE" ]; then
     read -p " EVM钱包地址（以太坊地址，0x 开头）： " COINBASE
   fi
-  read -p " 发布者私钥（可选，0x 开头，按回车跳过）： " PUBLISHER_PRIVATE_KEY
-  BLOB_URL="" # 默认跳过 Blob Sink URL
+  if [ -z "$P2P_IP" ]; then
+    read -p " P2P_IP（公共 IP，按回车自动获取）： " P2P_IP
+  fi
 
   # 验证输入
   validate_url "$ETH_RPC" "L1 执行客户端（EL）RPC URL"
@@ -249,68 +255,49 @@ install_and_start_node() {
   fi
   validate_private_keys "$VALIDATOR_PRIVATE_KEYS" "验证者私钥"
   validate_address "$COINBASE" "COINBASE 地址"
-  if [ -n "$PUBLISHER_PRIVATE_KEY" ]; then
-    validate_private_key "$PUBLISHER_PRIVATE_KEY" "发布者私钥"
+  if [ -z "$P2P_IP" ]; then
+    print_info "自动获取公共 IP..."
+    P2P_IP=$(curl -s ifconfig.me || echo "127.0.0.1")
+    print_info "    → $P2P_IP"
   fi
-
-  # 获取公共 IP
-  print_info "获取公共 IP..."
-  PUBLIC_IP=$(curl -s ifconfig.me || echo "127.0.0.1")
-  print_info "    → $PUBLIC_IP"
 
   # 生成 .env 文件
   print_info "生成 $AZTEC_DIR/.env 文件..."
   cat > "$AZTEC_DIR/.env" <<EOF
-ETHEREUM_HOSTS="$ETH_RPC"
-L1_CONSENSUS_HOST_URLS="$CONS_RPC"
-P2P_IP="$PUBLIC_IP"
+ETHEREUM_RPC_URL="$ETH_RPC"
+CONSENSUS_BEACON_URL="$CONS_RPC"
+P2P_IP="$P2P_IP"
 VALIDATOR_PRIVATE_KEYS="$VALIDATOR_PRIVATE_KEYS"
 COINBASE="$COINBASE"
-DATA_DIRECTORY="/data"
-LOG_LEVEL="debug"
+LOG_LEVEL=info
 EOF
-  if [ -n "$PUBLISHER_PRIVATE_KEY" ]; then
-    echo "PUBLISHER_PRIVATE_KEY=\"$PUBLISHER_PRIVATE_KEY\"" >> "$AZTEC_DIR/.env"
-  fi
-  if [ -n "$BLOB_URL" ]; then
-    echo "BLOB_SINK_URL=\"$BLOB_URL\"" >> "$AZTEC_DIR/.env"
-  fi
   chmod 600 "$AZTEC_DIR/.env"
 
-  # 设置启动标志
-  VALIDATOR_FLAG="--sequencer.validatorPrivateKeys \$VALIDATOR_PRIVATE_KEYS"
-  PUBLISHER_FLAG=""
-  if [ -n "$PUBLISHER_PRIVATE_KEY" ]; then
-    PUBLISHER_FLAG="--sequencer.publisherPrivateKey \$PUBLISHER_PRIVATE_KEY"
-  fi
-  BLOB_FLAG=""
-  if [ -n "$BLOB_URL" ]; then
-    BLOB_FLAG="--sequencer.blobSinkUrl \$BLOB_SINK_URL"
-  fi
-
-  # 生成 docker-compose.yml 文件
+  # 生成 docker-compose.yml 文件（完全匹配提供的 .yml 文件）
   print_info "生成 $AZTEC_DIR/docker-compose.yml 文件..."
   cat > "$AZTEC_DIR/docker-compose.yml" <<EOF
 services:
-  aztec-sequencer:
+  aztec-node:
     container_name: aztec-sequencer
-    network_mode: host
-    image: $AZTEC_IMAGE
+    image: aztecprotocol/aztec:2.0.2
     restart: unless-stopped
+    network_mode: host
     environment:
-      - ETHEREUM_HOSTS=\${ETHEREUM_HOSTS}
-      - L1_CONSENSUS_HOST_URLS=\${L1_CONSENSUS_HOST_URLS}
-      - P2P_IP=\${P2P_IP}
-      - VALIDATOR_PRIVATE_KEYS=\${VALIDATOR_PRIVATE_KEYS}
-      - COINBASE=\${COINBASE}
-      - DATA_DIRECTORY=\${DATA_DIRECTORY}
-      - LOG_LEVEL=\${LOG_LEVEL}
-      - PUBLISHER_PRIVATE_KEY=\${PUBLISHER_PRIVATE_KEY:-}
-      - BLOB_SINK_URL=\${BLOB_SINK_URL:-}
+      ETHEREUM_HOSTS: \${ETHEREUM_RPC_URL}
+      L1_CONSENSUS_HOST_URLS: \${CONSENSUS_BEACON_URL}
+      DATA_DIRECTORY: /data
+      VALIDATOR_PRIVATE_KEYS: \${VALIDATOR_PRIVATE_KEYS}
+      COINBASE: \${COINBASE}
+      P2P_IP: \${P2P_IP}
+      LOG_LEVEL: info
     entrypoint: >
-      sh -c "node --no-warnings /usr/src/yarn-project/aztec/dest/bin/index.js start --network alpha-testnet --node --archiver --sequencer $VALIDATOR_FLAG $PUBLISHER_FLAG \${BLOB_FLAG:-}"
+      sh -c 'node --no-warnings /usr/src/yarn-project/aztec/dest/bin/index.js start --network testnet --node --archiver --sequencer'
+    ports:
+      - 40400:40400/tcp
+      - 40400:40400/udp
+      - 8080:8080
     volumes:
-      - /root/.aztec/alpha-testnet/data/:/data
+      - /root/.aztec/testnet/data/:/data
 EOF
   chmod 644 "$AZTEC_DIR/docker-compose.yml"
 
@@ -387,7 +374,7 @@ stop_delete_update_restart_node() {
     print_info "未找到运行中的 aztec-sequencer 容器。"
   fi
 
-  # 删除旧版本镜像 aztecprotocol/aztec:1.2.0
+  # 删除旧版本镜像 aztecprotocol/aztec:1.2.1
   print_info "删除旧版本 Aztec 镜像 $OLD_AZTEC_IMAGE..."
   if docker images -q "$OLD_AZTEC_IMAGE" | grep -q .; then
     docker rmi "$OLD_AZTEC_IMAGE" 2>/dev/null || true
@@ -397,14 +384,14 @@ stop_delete_update_restart_node() {
   fi
 
   # 更新 Aztec CLI
-  print_info "更新 Aztec CLI 到 1.2.1..."
+  print_info "更新 Aztec CLI 到 2.0.2..."
   export PATH="$HOME/.aztec/bin:$PATH"
   if ! check_command aztec-up; then
     echo "错误：未找到 aztec-up 命令，正在尝试重新安装 Aztec CLI..."
     install_aztec_cli
   else
-    if ! aztec-up alpha-testnet 1.2.1; then  # 更新为 1.2.1
-      echo "错误：aztec-up alpha-testnet 1.2.1 失败，请检查网络或 Aztec CLI 安装。"
+    if ! aztec-up testnet 2.0.2; then # 更新为 testnet 和 2.0.2
+      echo "错误：aztec-up testnet 2.0.2 失败，请检查网络或 Aztec CLI 安装。"
       echo "按任意键返回主菜单..."
       read -n 1
       return
@@ -636,7 +623,7 @@ main_menu() {
     echo "3. 获取区块高度和同步证明（请等待半个小时后再查询）"
     echo "4. 停止节点、删除 Docker 容器、更新节点并重新创建 Docker"
     echo "5. 注册验证者"
-    echo "6. 删除 Docker 容器和节点数据"
+    echo "6. 删除 Djokovic: 删除 Docker 容器和节点数据"
     echo "7. 退出"
     read -p "请输入选项 (1-7): " choice
 
@@ -654,7 +641,7 @@ main_menu() {
             print_info "检测到错误：创世归档树根不匹配！"
             print_info "建议：1. 确保使用最新镜像 $AZTEC_IMAGE"
             print_info "      2. 清理旧数据：rm -rf /tmp/aztec-world-state-* $DATA_DIR"
-            print_info "      3. 重新运行 aztec-up alpha-testnet 和 aztec start"
+            print_info "      3. 重新运行 aztec-up testnet 和 aztec start"
             print_info "      4. 检查 L1 RPC URL 是否正确（Sepolia 网络）"
             print_info "      5. 联系 Aztec 社区寻求帮助"
           fi
@@ -692,4 +679,3 @@ main_menu() {
 
 # 执行主菜单
 main_menu
-
