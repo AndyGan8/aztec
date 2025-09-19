@@ -13,8 +13,8 @@ MIN_COMPOSE_VERSION="1.29.2"
 AZTEC_CLI_URL="https://install.aztec.network"
 AZTEC_DIR="/root/aztec"
 DATA_DIR="/root/.aztec/alpha-testnet/data"
-AZTEC_IMAGE="aztecprotocol/aztec:1.2.1"  # 更新为 1.2.1
-OLD_AZTEC_IMAGE="aztecprotocol/aztec:1.2.0"  # 旧版本为 1.2.0
+AZTEC_IMAGE="aztecprotocol/aztec:2.0.2"  # 更新为 2.0.2
+OLD_AZTEC_IMAGE="aztecprotocol/aztec:1.2.1"  # 旧版本为 1.2.1
 
 # 函数：打印信息
 print_info() {
@@ -692,3 +692,4 @@ main_menu() {
 
 # 执行主菜单
 main_menu
+
