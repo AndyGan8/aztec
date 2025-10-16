@@ -622,6 +622,215 @@ delete_docker_and_node() {
   read -n 1
 }
 
+# 修改节点状态检查函数，支持分布式节点
+check_node_status() {
+  # 颜色定义
+  GREEN='\033[0;32m'
+  RED='\033[0;31m'
+  YELLOW='\033[1;33m'
+  BLUE='\033[0;34m'
+  NC='\033[0m' # No Color
+
+  echo -e "${BLUE}=== 🔍 区块链节点状态检查 ===${NC}"
+  echo
+
+  # 检查 Aztec 节点状态（本地）
+  echo -e "${BLUE}📦 Aztec 节点状态 (本地):${NC}"
+  if docker ps -q -f name=aztec-sequencer | grep -q .; then
+    CONTAINER_STATUS=$(docker inspect aztec-sequencer --format='{{.State.Status}}' 2>/dev/null)
+    if [ "$CONTAINER_STATUS" = "running" ]; then
+      echo -e "  ${GREEN}✅ Aztec 容器: 运行中${NC}"
+      
+      # 检查端口监听
+      if ss -tulnp | grep -q ':8080'; then
+        echo -e "  ${GREEN}✅ RPC 端口 (8080): 监听中${NC}"
+      else
+        echo -e "  ${YELLOW}🟡 RPC 端口 (8080): 未监听${NC}"
+      fi
+      
+      if ss -tulnp | grep -q ':40400'; then
+        echo -e "  ${GREEN}✅ P2P 端口 (40400): 监听中${NC}"
+      else
+        echo -e "  ${YELLOW}🟡 P2P 端口 (40400): 未监听${NC}"
+      fi
+      
+      # 检查日志中的错误
+      RECENT_LOGS=$(docker logs --tail 20 aztec-sequencer 2>/dev/null)
+      if echo "$RECENT_LOGS" | grep -q -i "error\|failed\|exception"; then
+        echo -e "  ${YELLOW}🟡 最近日志: 发现错误${NC}"
+      else
+        echo -e "  ${GREEN}✅ 最近日志: 正常${NC}"
+      fi
+    else
+      echo -e "  ${RED}❌ Aztec 容器: $CONTAINER_STATUS${NC}"
+    fi
+  else
+    echo -e "  ${RED}❌ Aztec 容器: 未运行${NC}"
+  fi
+
+  echo
+
+  # 检查 Ethereum 节点状态（远程或本地）
+  echo -e "${BLUE}⛓️ Ethereum 节点状态:${NC}"
+  
+  # 获取 Ethereum 节点配置信息
+  if [ -f "$AZTEC_DIR/.env" ]; then
+    ETH_RPC=$(grep "ETHEREUM_HOSTS" "$AZTEC_DIR/.env" | cut -d'"' -f2)
+    CONS_RPC=$(grep "L1_CONSENSUS_HOST_URLS" "$AZTEC_DIR/.env" | cut -d'"' -f2)
+    
+    if [ -n "$ETH_RPC" ]; then
+      echo -e "  ${BLUE}🌐 执行层 RPC: $ETH_RPC${NC}"
+      # 测试执行层连接
+      if curl -s -X POST -H "Content-Type: application/json" \
+         --data '{"jsonrpc":"2.0","method":"net_version","params":[],"id":1}' \
+         "$ETH_RPC" > /dev/null 2>&1; then
+        echo -e "  ${GREEN}✅ 执行层连接: 正常${NC}"
+        
+        # 获取执行层区块高度
+        ETH_BLOCK=$(curl -s -X POST -H "Content-Type: application/json" \
+          --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
+          "$ETH_RPC" | grep -o '"result":"[^"]*"' | cut -d'"' -f4)
+        if [ -n "$ETH_BLOCK" ]; then
+          BLOCK_DEC=$(printf "%d" "$ETH_BLOCK")
+          echo -e "  ${GREEN}✅ 执行层区块: $BLOCK_DEC${NC}"
+        fi
+      else
+        echo -e "  ${RED}❌ 执行层连接: 失败${NC}"
+      fi
+    else
+      echo -e "  ${YELLOW}🟡 执行层 RPC: 未配置${NC}"
+    fi
+
+    if [ -n "$CONS_RPC" ]; then
+      echo -e "  ${BLUE}🌐 共识层 RPC: $CONS_RPC${NC}"
+      # 测试共识层连接
+      if curl -s "$CONS_RPC/eth/v1/node/health" > /dev/null 2>&1; then
+        echo -e "  ${GREEN}✅ 共识层连接: 正常${NC}"
+        
+        # 获取共识层同步状态
+        SYNC_STATUS=$(curl -s "$CONS_RPC/eth/v1/node/syncing" 2>/dev/null || echo "{}")
+        if echo "$SYNC_STATUS" | grep -q '"is_syncing":false'; then
+          echo -e "  ${GREEN}✅ 共识层同步: 完全同步${NC}"
+        elif echo "$SYNC_STATUS" | grep -q '"is_syncing":true'; then
+          SYNC_DISTANCE=$(echo "$SYNC_STATUS" | grep -o '"sync_distance":"[^"]*"' | cut -d'"' -f4)
+          echo -e "  ${YELLOW}🟡 共识层同步: 同步中 (距离: $SYNC_DISTANCE)${NC}"
+        else
+          echo -e "  ${YELLOW}🟡 共识层同步: 未知${NC}"
+        fi
+      else
+        echo -e "  ${RED}❌ 共识层连接: 失败${NC}"
+      fi
+    else
+      echo -e "  ${YELLOW}🟡 共识层 RPC: 未配置${NC}"
+    fi
+  else
+    echo -e "  ${YELLOW}🟡 Ethereum 节点: 未配置 (.env 文件不存在)${NC}"
+  fi
+
+  echo
+
+  # 检查本地 Ethereum 节点（如果存在）
+  echo -e "${BLUE}💻 本地 Ethereum 节点状态:${NC}"
+  
+  # 检查本地 Geth
+  if systemctl is-active --quiet geth 2>/dev/null; then
+    echo -e "  ${GREEN}✅ 本地 Geth: 运行中${NC}"
+    
+    # 检查 Geth 端口
+    if ss -tulnp | grep -q ':8545'; then
+      echo -e "  ${GREEN}✅ 本地 Geth RPC (8545): 监听中${NC}"
+    else
+      echo -e "  ${YELLOW}🟡 本地 Geth RPC (8545): 未监听${NC}"
+    fi
+  else
+    echo -e "  ${BLUE}ℹ️  本地 Geth: 未运行 (可能使用远程节点)${NC}"
+  fi
+
+  # 检查本地 Lighthouse
+  if systemctl is-active --quiet lighthouse 2>/dev/null; then
+    echo -e "  ${GREEN}✅ 本地 Lighthouse: 运行中${NC}"
+    
+    # 检查 Lighthouse 端口
+    if ss -tulnp | grep -q ':5052'; then
+      echo -e "  ${GREEN}✅ 本地 Lighthouse API (5052): 监听中${NC}"
+    else
+      echo -e "  ${YELLOW}🟡 本地 Lighthouse API (5052): 未监听${NC}"
+    fi
+  else
+    echo -e "  ${BLUE}ℹ️  本地 Lighthouse: 未运行 (可能使用远程节点)${NC}"
+  fi
+
+  echo
+
+  # 系统资源检查
+  echo -e "${BLUE}💻 系统资源状态:${NC}"
+  
+  # 内存使用
+  MEM_USED=$(free -m | awk 'NR==2{printf "%.1f", $3*100/$2}')
+  if (( $(echo "$MEM_USED < 80" | bc -l) )); then
+    echo -e "  ${GREEN}✅ 内存使用: ${MEM_USED}%${NC}"
+  else
+    echo -e "  ${YELLOW}🟡 内存使用: ${MEM_USED}% (较高)${NC}"
+  fi
+  
+  # 磁盘使用
+  DISK_USED=$(df / | awk 'NR==2{printf "%.1f", $5}')
+  DISK_USED=${DISK_USED%\%}
+  if (( $(echo "$DISK_USED < 80" | bc -l) )); then
+    echo -e "  ${GREEN}✅ 磁盘使用: ${DISK_USED}%${NC}"
+  else
+    echo -e "  ${YELLOW}🟡 磁盘使用: ${DISK_USED}% (较高)${NC}"
+  fi
+
+  # CPU 负载
+  LOAD_AVG=$(cat /proc/loadavg | awk '{print $1}')
+  CPU_CORES=$(nproc)
+  if (( $(echo "$LOAD_AVG < $CPU_CORES" | bc -l) )); then
+    echo -e "  ${GREEN}✅ CPU 负载: $LOAD_AVG${NC}"
+  else
+    echo -e "  ${YELLOW}🟡 CPU 负载: $LOAD_AVG (较高)${NC}"
+  fi
+
+  echo
+  echo -e "${BLUE}=== 🎯 状态总结 ===${NC}"
+  
+  # 总体状态判断
+  AZTEC_RUNNING=$(docker ps -q -f name=aztec-sequencer | wc -l)
+  ETH_CONNECTION=0
+  CONS_CONNECTION=0
+  
+  # 检查 Ethereum 连接状态
+  if [ -n "$ETH_RPC" ] && curl -s -X POST -H "Content-Type: application/json" \
+     --data '{"jsonrpc":"2.0","method":"net_version","params":[],"id":1}' \
+     "$ETH_RPC" > /dev/null 2>&1; then
+    ETH_CONNECTION=1
+  fi
+  
+  if [ -n "$CONS_RPC" ] && curl -s "$CONS_RPC/eth/v1/node/health" > /dev/null 2>&1; then
+    CONS_CONNECTION=1
+  fi
+  
+  TOTAL_STATUS=$((AZTEC_RUNNING + ETH_CONNECTION + CONS_CONNECTION))
+  
+  if [ $TOTAL_STATUS -eq 3 ]; then
+    echo -e "${GREEN}🟢 所有服务正常运行！${NC}"
+    echo -e "${GREEN}   • Aztec 节点: 运行中${NC}"
+    echo -e "${GREEN}   • Ethereum 执行层: 连接正常${NC}"
+    echo -e "${GREEN}   • Ethereum 共识层: 连接正常${NC}"
+  elif [ $TOTAL_STATUS -ge 1 ]; then
+    echo -e "${YELLOW}🟡 部分服务运行中 ($TOTAL_STATUS/3)${NC}"
+    [ $AZTEC_RUNNING -eq 1 ] && echo -e "${GREEN}   • Aztec 节点: 运行中${NC}" || echo -e "${RED}   • Aztec 节点: 未运行${NC}"
+    [ $ETH_CONNECTION -eq 1 ] && echo -e "${GREEN}   • Ethereum 执行层: 连接正常${NC}" || echo -e "${RED}   • Ethereum 执行层: 连接失败${NC}"
+    [ $CONS_CONNECTION -eq 1 ] && echo -e "${GREEN}   • Ethereum 共识层: 连接正常${NC}" || echo -e "${RED}   • Ethereum 共识层: 连接失败${NC}"
+  else
+    echo -e "${RED}🔴 所有服务均未运行${NC}"
+  fi
+
+  echo
+  echo "按任意键返回主菜单..."
+  read -n 1
+}
+
 # 主菜单函数
 main_menu() {
   while true; do
@@ -637,8 +846,9 @@ main_menu() {
     echo "4. 停止节点、删除 Docker 容器、更新节点并重新创建 Docker"
     echo "5. 注册验证者"
     echo "6. 删除 Docker 容器和节点数据"
-    echo "7. 退出"
-    read -p "请输入选项 (1-7): " choice
+    echo "7. 检查节点状态"
+    echo "8. 退出"
+    read -p "请输入选项 (1-8): " choice
 
     case $choice in
       1)
@@ -678,11 +888,14 @@ main_menu() {
         delete_docker_and_node
         ;;
       7)
+        check_node_status
+        ;;
+      8)
         print_info "退出脚本..."
         exit 0
         ;;
       *)
-        print_info "无效输入选项，请重新输入 1-7..."
+        print_info "无效输入选项，请重新输入 1-8..."
         echo "按任意键返回主菜单..."
         read -n 1
         ;;
