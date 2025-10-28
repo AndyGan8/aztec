@@ -13,8 +13,8 @@ MIN_COMPOSE_VERSION="1.29.2"
 AZTEC_CLI_URL="https://install.aztec.network"
 AZTEC_DIR="/root/aztec"
 DATA_DIR="/root/.aztec/alpha-testnet/data"
-AZTEC_IMAGE="aztecprotocol/aztec:2.0.4"  # 强制使用 2.0.4
-OLD_AZTEC_IMAGE="aztecprotocol/aztec:2.0.2"  # 旧版本
+AZTEC_IMAGE="aztecprotocol/aztec:2.0.4"
+OLD_AZTEC_IMAGE="aztecprotocol/aztec:2.0.2"
 
 # 函数：打印信息
 print_info() {
@@ -53,10 +53,10 @@ install_docker() {
     local version
     version=$(docker --version | grep -oP '\d+\.\d+\.\d+' || echo "0.0.0")
     if version_ge "$version" "$MIN_DOCKER_VERSION"; then
-      print_info "Docker 已安装，版本 $version，满足要求（>= $MIN_DOCKER_VERSION）。"
+      print_info "Docker 已安装，版本 $version。"
       return
     else
-      print_info "Docker 版本 $version 过低（要求 >= $MIN_DOCKER_VERSION），将重新安装..."
+      print_info "Docker 版本 $version 过低，将重新安装..."
     fi
   else
     print_info "未找到 Docker，正在安装..."
@@ -75,10 +75,10 @@ install_docker_compose() {
     local version
     version=$(docker-compose --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' || docker compose version | grep -oP '\d+\.\d+\.\d+' || echo "0.0.0")
     if version_ge "$version" "$MIN_COMPOSE_VERSION"; then
-      print_info "Docker Compose 已安装，版本 $version，满足要求（>= $MIN_COMPOSE_VERSION）。"
+      print_info "Docker Compose 已安装，版本 $version。"
       return
     else
-      print_info "Docker Compose 版本 $version 过低（要求 >= $MIN_COMPOSE_VERSION），将重新安装..."
+      print_info "Docker Compose 版本 $version 过低，将重新安装..."
     fi
   else
     print_info "未找到 Docker Compose，正在安装..."
@@ -176,10 +176,11 @@ validate_private_keys() {
   done
 }
 
-# ==================== 新增：执行治理提案投票 ====================
+# ==================== 修复版：执行治理提案投票（使用 docker exec） ====================
 vote_governance_proposal() {
   print_info "=== 执行治理提案投票（2.0.4） ==="
 
+  # 检查容器是否运行
   if ! docker ps -q -f name=aztec-sequencer | grep -q .; then
     print_info "错误：容器 aztec-sequencer 未运行，请先启动节点（选项 1）。"
     echo "按任意键返回主菜单..."
@@ -187,11 +188,15 @@ vote_governance_proposal() {
     return
   fi
 
+  # 确认操作
   read -p "警告：此操作将向节点发送治理提案信号，确认继续？(y/n): " confirm
   [[ "$confirm" != "y" ]] && { print_info "已取消投票。"; echo "按任意键返回主菜单..."; read -n 1; return; }
 
-  print_info "正在向节点发送治理提案信号..."
-  RESPONSE=$(curl -s -X POST http://127.0.0.1:8880 \
+  print_info "正在通过容器内部执行投票..."
+
+  # 使用 docker exec 在容器内直接 curl 127.0.0.1:8880
+  RESPONSE=$(docker exec aztec-sequencer curl -s --connect-timeout 10 \
+    -X POST http://127.0.0.1:8880 \
     -H 'Content-Type: application/json' \
     -d '{
       "jsonrpc":"2.0",
@@ -200,30 +205,33 @@ vote_governance_proposal() {
       "id":1
     }')
 
+  # 检查返回结果
   if echo "$RESPONSE" | grep -q '"result":true'; then
-    print_info "投票信号发送成功！"
+    print_info "投票成功！治理提案已信号。"
+    print_info "Payload: 0xDCd9DdeAbEF70108cE02576df1eB333c4244C666"
+  elif echo "$RESPONSE" | grep -q "method not found"; then
+    print_info "失败：nodeAdmin_setConfig 方法未找到。"
+    print_info "可能原因："
+    print_info "  1. 节点版本不是 2.0.4"
+    print_info "  2. 未启用 admin RPC"
+    print_info "建议：执行 选项 4 升级到 2.0.4 并重启节点"
+  elif echo "$RESPONSE" | grep -q "Connection refused\|timeout"; then
+    print_info "失败：无法连接到 admin RPC (8880)"
+    print_info "可能原因：admin RPC 未启动或端口未监听"
+  elif [ -z "$RESPONSE" ]; then
+    print_info "失败：无响应，请检查节点日志"
   else
-    print_info "投票信号发送失败，返回：$RESPONSE"
-    echo "按任意键返回主菜单..."
-    read -n 1
-    return
+    print_info "投票失败，返回：$RESPONSE"
   fi
 
-  # 写入 .env 环境变量（持久化）
+  # 写入 .env 持久化环境变量
   ENV_FILE="$AZTEC_DIR/.env"
   if [ -f "$ENV_FILE" ] && ! grep -q "GOVERNANCE_PROPOSER_PAYLOAD_ADDRESS" "$ENV_FILE"; then
     echo 'GOVERNANCE_PROPOSER_PAYLOAD_ADDRESS="0xDCd9DdeAbEF70108cE02576df1eB333c4244C666"' >> "$ENV_FILE"
     print_info "已写入环境变量（重启后仍生效）。"
   fi
 
-  # 添加 8880 端口映射
-  COMPOSE_FILE="$AZTEC_DIR/docker-compose.yml"
-  if [ -f "$COMPOSE_FILE" ] && ! grep -q "8880:8880" "$COMPOSE_FILE"; then
-    sed -i '/ports:/a\      - "8880:8880"' "$COMPOSE_FILE" 2>/dev/null || true
-    print_info "已添加端口映射 8880:8880（投票后可删除）。"
-  fi
-
-  print_info "投票完成！请在 24 小时内升级至 2.0.4 避免被 slashing。"
+  print_info "投票流程结束。"
   echo "按任意键返回主菜单..."
   read -n 1
 }
@@ -250,7 +258,6 @@ install_and_start_node() {
   ufw allow 40400/tcp >/dev/null 2>&1
   ufw allow 40400/udp >/dev/null 2>&1
   ufw allow 8080/tcp >/dev/null 2>&1
-  ufw allow 8880/tcp >/dev/null 2>&1  # 投票端口
 
   ETH_RPC="${ETH_RPC:-}"
   CONS_RPC="${CONS_RPC:-}"
@@ -305,8 +312,6 @@ services:
       - DATA_DIRECTORY=\${DATA_DIRECTORY}
       - LOG_LEVEL=\${LOG_LEVEL}
       - PUBLISHER_PRIVATE_KEY=\${PUBLISHER_PRIVATE_KEY:-}
-    ports:
-      - "8880:8880"
     entrypoint: >
       sh -c "node --no-warnings /usr/src/yarn-project/aztec/dest/bin/index.js start --network alpha-testnet --node --archiver --sequencer $VALIDATOR_FLAG $PUBLISHER_FLAG"
     volumes:
@@ -322,8 +327,7 @@ EOF
   docker compose up -d || docker-compose up -d
 
   print_info "安装完成！"
-  print_info "查看日志：docker logs -f aztec-sequencer"
-  print_info "请在 24 小时内执行选项 9 完成投票！"
+  print_info "请在 24 小时内执行 选项 9 完成投票！"
 }
 
 # 停止、删除、更新、重启
@@ -396,12 +400,11 @@ delete_docker_and_node() {
   print_info "清理完成。"
 }
 
-# 检查节点状态（简化版）
+# 检查节点状态
 check_node_status() {
   print_info "检查中..."
   docker ps | grep aztec-sequencer && print_info "容器运行中" || print_info "容器未运行"
   ss -tulnp | grep -q ':8080' && print_info "RPC 8080 监听" || print_info "RPC 未监听"
-  ss -tulnp | grep -q ':8880' && print_info "Admin 8880 监听" || print_info "Admin 未监听"
 }
 
 # 主菜单
