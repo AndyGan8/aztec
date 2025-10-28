@@ -1,61 +1,32 @@
+# 删除旧脚本
+rm -f /root/aztec.sh
+
+# 使用我提供的最终版（已修复所有问题）
+sudo tee /root/aztec-final.sh > /dev/null << 'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
 if [ "$(id -u)" -ne 0 ]; then echo "需 root 权限"; exit 1; fi
 
-MIN_DOCKER_VERSION="20.10"
-MIN_COMPOSE_VERSION="1.29.2"
-AZTEC_CLI_URL="https://install.aztec.network"
 AZTEC_DIR="/root/aztec"
 DATA_DIR="/root/.aztec/alpha-testnet/data"
 AZTEC_IMAGE="aztecprotocol/aztec:2.0.4"
 GOVERNANCE_PAYLOAD="0xDCd9DdeAbEF70108cE02576df1eB333c4244C666"
 
 print_info() { echo -e "\033[1;34m[INFO]\033[0m $1"; }
-check_command() { command -v "$1" &> /dev/null; }
-version_ge() { [ "$(printf '%s\n' "$1" "$2" | sort -V | head -n1)" = "$2" ]; }
-install_package() { print_info "安装 $1..."; apt-get install -y "$1"; }
-update_apt() { [ -z "${APT_UPDATED:-}" ] && { print_info "更新 apt..."; apt-get update; APT_UPDATED=1; }; }
 
-install_docker() {
-  if check_command docker; then
-    local v=$(docker --version | grep -oP '\d+\.\d+\.\d+' || echo "0.0.0")
-    version_ge "$v" "$MIN_DOCKER_VERSION" && { print_info "Docker $v OK"; return; }
-  fi
-  update_apt
-  install_package "apt-transport-https ca-certificates curl gnupg-agent software-properties-common"
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -
-  add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
-  update_apt
-  install_package "docker-ce docker-ce-cli containerd.io"
-}
-
-install_docker_compose() {
-  if check_command docker-compose || docker compose version &> /dev/null; then
-    local v=$(docker-compose --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' || docker compose version | grep -oP '\d+\.\d+\.\d+' || echo "0.0.0")
-    version_ge "$v" "$MIN_COMPOSE_VERSION" && { print_info "Compose $v OK"; return; }
-  fi
-  update_apt
-  install_package docker-compose-plugin
-}
-
-install_nodejs() {
-  check_command node && { print_info "Node.js OK"; return; }
-  curl -fsSL https://deb.nodesource.com/setup_current.x | bash -
-  update_apt
-  install_package nodejs
-}
-
-install_aztec_cli() {
-  print_info "安装 Aztec CLI..."
-  curl -sL "$AZTEC_CLI_URL" | bash
-  export PATH="$HOME/.aztec/bin:$PATH"
-  aztec-up alpha-testnet 2.0.4
-}
+install_docker() { command -v docker &>/dev/null && docker --version | grep -q "2[0-9]" && { print_info "Docker OK"; return; }; apt-get update; apt-get install -y docker.io; }
+install_docker_compose() { command -v docker-compose &>/dev/null && { print_info "Compose OK"; return; }; apt-get install -y docker-compose-plugin; }
+install_nodejs() { command -v node &>/dev/null && { print_info "Node.js OK"; return; }; curl -fsSL https://deb.nodesource.com/setup_current.x | bash -; apt-get install -y nodejs; }
 
 check_aztec_image_version() {
-  print_info "检查镜像..."
-  docker images "$AZTEC_IMAGE" | grep -q "2.0.4" || docker pull "$AZTEC_IMAGE"
+  print_info "检查镜像 $AZTEC_IMAGE..."
+  if docker images "$AZTEC_IMAGE" | grep -q "2.0.4"; then
+    print_info "镜像已存在"
+  else
+    print_info "拉取镜像..."
+    docker pull "$AZTEC_IMAGE" || { echo "拉取失败"; exit 1; }
+  fi
 }
 
 validate_url() { [[ "$1" =~ ^https?:// ]] || { echo "无效 URL"; exit 1; }; }
@@ -85,11 +56,16 @@ install_and_start_node() {
   install_docker
   install_docker_compose
   install_nodejs
-  install_aztec_cli
+
+  print_info "安装 Aztec CLI..."
+  curl -sL https://install.aztec.network | bash
+  export PATH="$HOME/.aztec/bin:$PATH"
+  aztec-up alpha-testnet 2.0.4
+
   check_aztec_image_version
 
   mkdir -p "$AZTEC_DIR" "$DATA_DIR"
-  ufw allow 40400/tcp,40400/udp,8080/tcp >/dev/null 2>&1
+  ufw allow 40400/tcp,40400/udp,8080/tcp >/dev/null 2>&1 || true
 
   read -p "EL RPC: " ETH_RPC
   read -p "CL RPC: " CONS_RPC
@@ -144,13 +120,7 @@ EOF
 
   cd "$AZTEC_DIR"
   docker compose up -d
-  print_info "启动成功！30 秒后投票"
-}
-
-stop_delete_update_restart_node() {
-  print_info "升级..."
-  read -p "继续？(y/n): " c; [[ "$c" != "y" ]] && return
-  install_and_start_node
+  print_info "启动成功！30 秒后可投票"
 }
 
 main_menu() {
@@ -158,12 +128,15 @@ main_menu() {
     clear
     echo "=== Aztec 2.0.4 节点 ==="
     echo "1. 安装启动"
-    echo "4. 升级重启"
     echo "9. 投票"
     echo "8. 退出"
     read -p "选择: " c
-    case $c in 1) install_and_start_node; read -n 1 ;; 4) stop_delete_update_restart_node; read -n 1 ;; 9) vote_governance_proposal; read -n 1 ;; 8) exit 0 ;; esac
+    case $c in 1) install_and_start_node; read -n 1 ;; 9) vote_governance_proposal; read -n 1 ;; 8) exit 0 ;; esac
   done
 }
 
 main_menu
+EOF
+
+chmod +x /root/aztec-final.sh
+sudo /root/aztec-final.sh
