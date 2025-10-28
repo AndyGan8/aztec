@@ -219,8 +219,8 @@ fix_rpc_ports() {
 
   # 4. 检查端口状态
   print_info "检查端口监听状态..."
-  RPC_CHECK=$(ss -tulnp | grep ':8080' | wc -l)
-  P2P_CHECK=$(ss -tulnp | grep ':40400' | wc -l)
+  RPC_CHECK=$(ss -tuln 2>/dev/null | grep ':8080' | wc -l)
+  P2P_CHECK=$(ss -tuln 2>/dev/null | grep ':40400' | wc -l)
 
   if [ "$RPC_CHECK" -gt 0 ]; then
     print_info "✅ RPC 端口 (8080) 现在正在监听"
@@ -798,13 +798,24 @@ check_node_status() {
   # 检查 Aztec 节点状态（本地）
   echo -e "${BLUE} Aztec 节点状态 (本地):${NC}"
   if docker ps -q -f name=aztec-sequencer | grep -q .; then
-    CONTAINER_STATUS=$(docker inspect aztec-sequencer --format='{{.State.Status}}' 2>/dev/null)
+    CONTAINER_STATUS=$(docker inspect aztec-sequencer --format='{{.State.Status}}' 2>/dev/null || echo "unknown")
     if [ "$CONTAINER_STATUS" = "running" ]; then
       echo -e "  ${GREEN} Aztec 容器: 运行中${NC}"
 
-      # 检查端口监听
-      RPC_PORT_LISTENING=$(ss -tulnp | grep ':8080' | wc -l)
-      P2P_PORT_LISTENING=$(ss -tulnp | grep ':40400' | wc -l)
+      # 检查端口监听 - 修复命令执行问题
+      RPC_PORT_LISTENING=0
+      P2P_PORT_LISTENING=0
+      
+      # 使用更稳定的方式检查端口
+      if command -v ss >/dev/null 2>&1; then
+        RPC_PORT_LISTENING=$(ss -tuln 2>/dev/null | grep ':8080' | wc -l)
+        P2P_PORT_LISTENING=$(ss -tuln 2>/dev/null | grep ':40400' | wc -l)
+      elif command -v netstat >/dev/null 2>&1; then
+        RPC_PORT_LISTENING=$(netstat -tuln 2>/dev/null | grep ':8080' | wc -l)
+        P2P_PORT_LISTENING=$(netstat -tuln 2>/dev/null | grep ':40400' | wc -l)
+      else
+        echo -e "  ${YELLOW} 警告: 无法检查端口状态 (缺少 ss 或 netstat 命令)${NC}"
+      fi
       
       if [ "$RPC_PORT_LISTENING" -gt 0 ]; then
         echo -e "  ${GREEN} RPC 端口 (8080): 监听中${NC}"
@@ -821,9 +832,13 @@ check_node_status() {
       fi
 
       # 检查日志中的错误
-      RECENT_LOGS=$(docker logs --tail 20 aztec-sequencer 2>/dev/null)
+      RECENT_LOGS=$(docker logs --tail 20 aztec-sequencer 2>/dev/null | head -10)
       if echo "$RECENT_LOGS" | grep -q -i "error\|failed\|exception"; then
         echo -e "  ${YELLOW} 最近日志: 发现错误${NC}"
+        # 显示具体错误
+        echo "$RECENT_LOGS" | grep -i "error\|failed\|exception" | head -3 | while read line; do
+          echo -e "    ${RED}   - $line${NC}"
+        done
       else
         echo -e "  ${GREEN} 最近日志: 正常${NC}"
       fi
@@ -851,25 +866,28 @@ check_node_status() {
 
   # 获取 Ethereum 节点配置信息
   if [ -f "$AZTEC_DIR/.env" ]; then
-    ETH_RPC=$(grep "ETHEREUM_HOSTS" "$AZTEC_DIR/.env" | cut -d'"' -f2)
-    CONS_RPC=$(grep "L1_CONSENSUS_HOST_URLS" "$AZTEC_DIR/.env" | cut -d'"' -f2)
+    ETH_RPC=$(grep "ETHEREUM_HOSTS" "$AZTEC_DIR/.env" | cut -d'"' -f2 2>/dev/null || echo "")
+    CONS_RPC=$(grep "L1_CONSENSUS_HOST_URLS" "$AZTEC_DIR/.env" | cut -d'"' -f2 2>/dev/null || echo "")
     GOVERNANCE_ADDRESS=$(grep "GOVERNANCE_PROPOSER_PAYLOAD_ADDRESS" "$AZTEC_DIR/.env" | cut -d'"' -f2 2>/dev/null || echo "")
 
     if [ -n "$ETH_RPC" ]; then
-      echo -e "  ${BLUE} 执行层 RPC: $ETH_RPC${NC}"
+      echo -e "  ${BLUE} 执行层 RPC: ${ETH_RPC:0:50}...${NC}"  # 只显示前50个字符
       # 测试执行层连接
-      if curl -s -X POST -H "Content-Type: application/json" \
+      if curl -s -m 10 -X POST -H "Content-Type: application/json" \
          --data '{"jsonrpc":"2.0","method":"net_version","params":[],"id":1}' \
          "$ETH_RPC" > /dev/null 2>&1; then
         echo -e "  ${GREEN} 执行层连接: 正常${NC}"
 
         # 获取执行层区块高度
-        ETH_BLOCK=$(curl -s -X POST -H "Content-Type: application/json" \
+        ETH_BLOCK_RESPONSE=$(curl -s -m 10 -X POST -H "Content-Type: application/json" \
           --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
-          "$ETH_RPC" | grep -o '"result":"[^"]*"' | cut -d'"' -f4)
-        if [ -n "$ETH_BLOCK" ]; then
-          BLOCK_DEC=$(printf "%d" "$ETH_BLOCK")
-          echo -e "  ${GREEN} 执行层区块: $BLOCK_DEC${NC}"
+          "$ETH_RPC" 2>/dev/null || echo "")
+        if [ -n "$ETH_BLOCK_RESPONSE" ]; then
+          ETH_BLOCK=$(echo "$ETH_BLOCK_RESPONSE" | grep -o '"result":"[^"]*"' | cut -d'"' -f4)
+          if [ -n "$ETH_BLOCK" ]; then
+            BLOCK_DEC=$(printf "%d" "$ETH_BLOCK" 2>/dev/null || echo "N/A")
+            echo -e "  ${GREEN} 执行层区块: $BLOCK_DEC${NC}"
+          fi
         fi
       else
         echo -e "  ${RED} 执行层连接: 失败${NC}"
@@ -884,25 +902,27 @@ check_node_status() {
         echo -e "  ${GREEN} 共识层 RPC: 多RPC配置（故障转移已启用）${NC}"
         MAIN_RPC=$(echo "$CONS_RPC" | cut -d',' -f1)
         BACKUP_RPC=$(echo "$CONS_RPC" | cut -d',' -f2)
-        echo -e "  ${BLUE}   主RPC: $MAIN_RPC${NC}"
-        echo -e "  ${BLUE}   备用RPC: $BACKUP_RPC${NC}"
+        echo -e "  ${BLUE}   主RPC: ${MAIN_RPC:0:50}...${NC}"
+        if [ -n "$BACKUP_RPC" ]; then
+          echo -e "  ${BLUE}   备用RPC: ${BACKUP_RPC:0:50}...${NC}"
+        fi
       else
         echo -e "  ${YELLOW} 共识层 RPC: 单一RPC（建议添加备用）${NC}"
-        echo -e "  ${BLUE}   $CONS_RPC${NC}"
+        echo -e "  ${BLUE}   ${CONS_RPC:0:50}...${NC}"
       fi
       
       # 测试共识层连接
       MAIN_CONS_RPC=$(echo "$CONS_RPC" | cut -d',' -f1)
-      if curl -s "$MAIN_CONS_RPC/eth/v1/node/health" > /dev/null 2>&1; then
+      if curl -s -m 10 "$MAIN_CONS_RPC/eth/v1/node/health" > /dev/null 2>&1; then
         echo -e "  ${GREEN} 共识层连接: 正常${NC}"
 
         # 获取共识层同步状态
-        SYNC_STATUS=$(curl -s "$MAIN_CONS_RPC/eth/v1/node/syncing" 2>/dev/null || echo "{}")
+        SYNC_STATUS=$(curl -s -m 10 "$MAIN_CONS_RPC/eth/v1/node/syncing" 2>/dev/null || echo "{}")
         if echo "$SYNC_STATUS" | grep -q '"is_syncing":false'; then
           echo -e "  ${GREEN} 共识层同步: 完全同步${NC}"
         elif echo "$SYNC_STATUS" | grep -q '"is_syncing":true'; then
           SYNC_DISTANCE=$(echo "$SYNC_STATUS" | grep -o '"sync_distance":"[^"]*"' | cut -d'"' -f4)
-          echo -e "  ${YELLOW} 共识层同步: 同步中 (距离: $SYNC_DISTANCE)${NC}"
+          echo -e "  ${YELLOW} 共识层同步: 同步中 (距离: ${SYNC_DISTANCE:-未知})${NC}"
         else
           echo -e "  ${YELLOW} 共识层同步: 未知${NC}"
         fi
@@ -933,7 +953,7 @@ check_node_status() {
     echo -e "  ${GREEN} 本地 Geth: 运行中${NC}"
 
     # 检查 Geth 端口
-    if ss -tulnp | grep -q ':8545'; then
+    if ss -tuln 2>/dev/null | grep -q ':8545'; then
       echo -e "  ${GREEN} 本地 Geth RPC (8545): 监听中${NC}"
     else
       echo -e "  ${YELLOW} 本地 Geth RPC (8545): 未监听${NC}"
@@ -947,7 +967,7 @@ check_node_status() {
     echo -e "  ${GREEN} 本地 Lighthouse: 运行中${NC}"
 
     # 检查 Lighthouse 端口
-    if ss -tulnp | grep -q ':5052'; then
+    if ss -tuln 2>/dev/null | grep -q ':5052'; then
       echo -e "  ${GREEN} 本地 Lighthouse API (5052): 监听中${NC}"
     else
       echo -e "  ${YELLOW} 本地 Lighthouse API (5052): 未监听${NC}"
@@ -962,29 +982,54 @@ check_node_status() {
   echo -e "${BLUE} 系统资源状态:${NC}"
 
   # 内存使用
-  MEM_USED=$(free -m | awk 'NR==2{printf "%.1f", $3*100/$2}')
-  if (( $(echo "$MEM_USED < 80" | bc -l) )); then
-    echo -e "  ${GREEN} 内存使用: ${MEM_USED}%${NC}"
+  if command -v free >/dev/null 2>&1; then
+    MEM_TOTAL=$(free -m 2>/dev/null | awk 'NR==2{print $2}')
+    MEM_USED=$(free -m 2>/dev/null | awk 'NR==2{print $3}')
+    if [ -n "$MEM_TOTAL" ] && [ "$MEM_TOTAL" -gt 0 ]; then
+      MEM_PERCENT=$((MEM_USED * 100 / MEM_TOTAL))
+      if [ "$MEM_PERCENT" -lt 80 ]; then
+        echo -e "  ${GREEN} 内存使用: ${MEM_PERCENT}%${NC}"
+      else
+        echo -e "  ${YELLOW} 内存使用: ${MEM_PERCENT}% (较高)${NC}"
+      fi
+    else
+      echo -e "  ${YELLOW} 内存使用: 无法获取${NC}"
+    fi
   else
-    echo -e "  ${YELLOW} 内存使用: ${MEM_USED}% (较高)${NC}"
+    echo -e "  ${YELLOW} 内存使用: 无法检查${NC}"
   fi
 
   # 磁盘使用
-  DISK_USED=$(df / | awk 'NR==2{printf "%.1f", $5}')
-  DISK_USED=${DISK_USED%\%}
-  if (( $(echo "$DISK_USED < 80" | bc -l) )); then
-    echo -e "  ${GREEN} 磁盘使用: ${DISK_USED}%${NC}"
+  if command -v df >/dev/null 2>&1; then
+    DISK_USED=$(df / 2>/dev/null | awk 'NR==2{print $5}' | sed 's/%//')
+    if [ -n "$DISK_USED" ]; then
+      if [ "$DISK_USED" -lt 80 ]; then
+        echo -e "  ${GREEN} 磁盘使用: ${DISK_USED}%${NC}"
+      else
+        echo -e "  ${YELLOW} 磁盘使用: ${DISK_USED}% (较高)${NC}"
+      fi
+    else
+      echo -e "  ${YELLOW} 磁盘使用: 无法获取${NC}"
+    fi
   else
-    echo -e "  ${YELLOW} 磁盘使用: ${DISK_USED}% (较高)${NC}"
+    echo -e "  ${YELLOW} 磁盘使用: 无法检查${NC}"
   fi
 
   # CPU 负载
-  LOAD_AVG=$(cat /proc/loadavg | awk '{print $1}')
-  CPU_CORES=$(nproc)
-  if (( $(echo "$LOAD_AVG < $CPU_CORES" | bc -l) )); then
-    echo -e "  ${GREEN} CPU 负载: $LOAD_AVG${NC}"
+  if [ -f /proc/loadavg ]; then
+    LOAD_AVG=$(cat /proc/loadavg 2>/dev/null | awk '{print $1}')
+    CPU_CORES=$(nproc 2>/dev/null || echo "1")
+    if [ -n "$LOAD_AVG" ] && [ -n "$CPU_CORES" ]; then
+      if (( $(echo "$LOAD_AVG < $CPU_CORES" | bc -l 2>/dev/null) )); then
+        echo -e "  ${GREEN} CPU 负载: $LOAD_AVG${NC}"
+      else
+        echo -e "  ${YELLOW} CPU 负载: $LOAD_AVG (较高)${NC}"
+      fi
+    else
+      echo -e "  ${YELLOW} CPU 负载: 无法获取${NC}"
+    fi
   else
-    echo -e "  ${YELLOW} CPU 负载: $LOAD_AVG (较高)${NC}"
+    echo -e "  ${YELLOW} CPU 负载: 无法检查${NC}"
   fi
 
   echo
@@ -996,13 +1041,13 @@ check_node_status() {
   CONS_CONNECTION=0
 
   # 检查 Ethereum 连接状态
-  if [ -n "$ETH_RPC" ] && curl -s -X POST -H "Content-Type: application/json" \
+  if [ -n "$ETH_RPC" ] && curl -s -m 10 -X POST -H "Content-Type: application/json" \
      --data '{"jsonrpc":"2.0","method":"net_version","params":[],"id":1}' \
      "$ETH_RPC" > /dev/null 2>&1; then
     ETH_CONNECTION=1
   fi
 
-  if [ -n "$CONS_RPC" ] && curl -s "$(echo "$CONS_RPC" | cut -d',' -f1)/eth/v1/node/health" > /dev/null 2>&1; then
+  if [ -n "$CONS_RPC" ] && curl -s -m 10 "$(echo "$CONS_RPC" | cut -d',' -f1)/eth/v1/node/health" > /dev/null 2>&1; then
     CONS_CONNECTION=1
   fi
 
