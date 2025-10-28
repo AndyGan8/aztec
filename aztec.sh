@@ -19,6 +19,9 @@ GOVERNANCE_PROPOSER_PAYLOAD="0xDCd9DdeAbEF70108cE02576df1eB333c4244C666"
 # 社区提供的快照URL解决方案
 SNAPSHOT_URL_1="https://snapshots.aztec.graphops.xyz/files/"
 SNAPSHOT_URL_2="https://files5.blacknodes.net/Aztec/"
+# 备用共识层RPC列表
+BACKUP_CONSENSUS_RPC_1="https://sepolia.beacon-api.nimbus.team"
+BACKUP_CONSENSUS_RPC_2="https://eth-sepolia-public.unifra.io"
 
 # 函数：打印信息
 print_info() {
@@ -217,6 +220,16 @@ fix_snapshot_sync() {
     sed -i "s|--sequencer|--sequencer --snapshots-url $selected_url|" "$AZTEC_DIR/docker-compose.yml"
   fi
   
+  # 检查并确保有备用共识层RPC
+  if [ -f "$AZTEC_DIR/.env" ]; then
+    if ! grep -q "," "$AZTEC_DIR/.env" | grep "L1_CONSENSUS_HOST_URLS"; then
+      print_info "检测到单一共识层RPC，正在添加备用RPC..."
+      CURRENT_RPC=$(grep "L1_CONSENSUS_HOST_URLS" "$AZTEC_DIR/.env" | cut -d'"' -f2)
+      sed -i "s|L1_CONSENSUS_HOST_URLS=.*|L1_CONSENSUS_HOST_URLS=\"${CURRENT_RPC},${BACKUP_CONSENSUS_RPC_1}\"|" "$AZTEC_DIR/.env"
+      print_info "已添加备用共识层RPC: $BACKUP_CONSENSUS_RPC_1"
+    fi
+  fi
+  
   print_info "已应用快照URL修复: $selected_url"
   
   # 重新启动
@@ -272,6 +285,7 @@ install_and_start_node() {
   print_info ""
   print_info "  - L1 共识（CL）RPC URL："
   print_info "    1. 在 https://drpc.org/ 获取 Beacon Chain Sepolia 的 RPC (http://xxx)"
+  print_info "    2. 建议添加备用RPC，用逗号分隔多个地址"
   print_info ""
   print_info "  - COINBASE：接收奖励的以太坊地址（格式：0x...）"
   print_info ""
@@ -284,7 +298,12 @@ install_and_start_node() {
     read -p " L1 执行客户端（EL）RPC URL： " ETH_RPC
   fi
   if [ -z "$CONS_RPC" ]; then
-    read -p " L1 共识（CL）RPC URL： " CONS_RPC
+    read -p " L1 共识（CL）RPC URL（建议添加备用RPC，用逗号分隔）： " CONS_RPC
+    # 如果没有添加备用RPC，自动添加一个
+    if [[ "$CONS_RPC" != *","* ]]; then
+      CONS_RPC="$CONS_RPC,$BACKUP_CONSENSUS_RPC_1"
+      print_info "已自动添加备用共识层RPC: $BACKUP_CONSENSUS_RPC_1"
+    fi
   fi
   if [ -z "$VALIDATOR_PRIVATE_KEYS" ]; then
     read -p " 验证者私钥（多个私钥用逗号分隔，0x 开头）： " VALIDATOR_PRIVATE_KEYS
@@ -421,6 +440,12 @@ EOF
     print_info "  - 治理提案投票：已配置 ($GOVERNANCE_ADDRESS)"
   else
     print_info "  - 治理提案投票：未配置（可通过菜单选项8设置）"
+  fi
+  # 显示RPC配置信息
+  if [[ "$CONS_RPC" == *","* ]]; then
+    print_info "  - 共识层RPC：多RPC配置（故障转移已启用）"
+  else
+    print_info "  - 共识层RPC：单一RPC配置"
   fi
 }
 
@@ -781,13 +806,25 @@ check_node_status() {
     fi
 
     if [ -n "$CONS_RPC" ]; then
-      echo -e "  ${BLUE} 共识层 RPC: $CONS_RPC${NC}"
+      # 检查是否有多个RPC（包含逗号）
+      if [[ "$CONS_RPC" == *","* ]]; then
+        echo -e "  ${GREEN} 共识层 RPC: 多RPC配置（故障转移已启用）${NC}"
+        MAIN_RPC=$(echo "$CONS_RPC" | cut -d',' -f1)
+        BACKUP_RPC=$(echo "$CONS_RPC" | cut -d',' -f2)
+        echo -e "  ${BLUE}   主RPC: $MAIN_RPC${NC}"
+        echo -e "  ${BLUE}   备用RPC: $BACKUP_RPC${NC}"
+      else
+        echo -e "  ${YELLOW} 共识层 RPC: 单一RPC（建议添加备用）${NC}"
+        echo -e "  ${BLUE}   $CONS_RPC${NC}"
+      fi
+      
       # 测试共识层连接
-      if curl -s "$CONS_RPC/eth/v1/node/health" > /dev/null 2>&1; then
+      MAIN_CONS_RPC=$(echo "$CONS_RPC" | cut -d',' -f1)
+      if curl -s "$MAIN_CONS_RPC/eth/v1/node/health" > /dev/null 2>&1; then
         echo -e "  ${GREEN} 共识层连接: 正常${NC}"
 
         # 获取共识层同步状态
-        SYNC_STATUS=$(curl -s "$CONS_RPC/eth/v1/node/syncing" 2>/dev/null || echo "{}")
+        SYNC_STATUS=$(curl -s "$MAIN_CONS_RPC/eth/v1/node/syncing" 2>/dev/null || echo "{}")
         if echo "$SYNC_STATUS" | grep -q '"is_syncing":false'; then
           echo -e "  ${GREEN} 共识层同步: 完全同步${NC}"
         elif echo "$SYNC_STATUS" | grep -q '"is_syncing":true'; then
@@ -892,7 +929,7 @@ check_node_status() {
     ETH_CONNECTION=1
   fi
 
-  if [ -n "$CONS_RPC" ] && curl -s "$CONS_RPC/eth/v1/node/health" > /dev/null 2>&1; then
+  if [ -n "$CONS_RPC" ] && curl -s "$(echo "$CONS_RPC" | cut -d',' -f1)/eth/v1/node/health" > /dev/null 2>&1; then
     CONS_CONNECTION=1
   fi
 
@@ -908,6 +945,11 @@ check_node_status() {
     else
       echo -e "${YELLOW}   • 治理提案投票: 未配置${NC}"
     fi
+    if [[ "$CONS_RPC" == *","* ]]; then
+      echo -e "${GREEN}   • RPC故障转移: 已启用${NC}"
+    else
+      echo -e "${YELLOW}   • RPC故障转移: 未配置${NC}"
+    fi
   elif [ $TOTAL_STATUS -ge 1 ]; then
     echo -e "${YELLOW} 部分服务运行中 ($TOTAL_STATUS/3)${NC}"
     [ $AZTEC_RUNNING -eq 1 ] && echo -e "${GREEN}   • Aztec 节点: 运行中${NC}" || echo -e "${RED}   • Aztec 节点: 未运行${NC}"
@@ -917,6 +959,11 @@ check_node_status() {
       echo -e "${GREEN}   • 治理提案投票: 已配置${NC}"
     else
       echo -e "${YELLOW}   • 治理提案投票: 未配置${NC}"
+    fi
+    if [[ "$CONS_RPC" == *","* ]]; then
+      echo -e "${GREEN}   • RPC故障转移: 已启用${NC}"
+    else
+      echo -e "${YELLOW}   • RPC故障转移: 未配置${NC}"
     fi
   else
     echo -e "${RED} 所有服务均未运行${NC}"
