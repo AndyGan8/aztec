@@ -183,6 +183,64 @@ validate_private_keys() {
   done
 }
 
+# RPC 端口修复函数
+fix_rpc_ports() {
+  print_info "=== 修复 RPC 端口监听问题 ==="
+  
+  # 检查配置目录是否存在
+  if [ ! -f "$AZTEC_DIR/.env" ]; then
+    print_info "错误：未找到 $AZTEC_DIR/.env 文件，请先安装并启动节点。"
+    return 1
+  fi
+
+  # 1. 检查并添加备用 RPC
+  print_info "检查共识层 RPC 配置..."
+  CURRENT_CONS_RPC=$(grep "L1_CONSENSUS_HOST_URLS" "$AZTEC_DIR/.env" | cut -d'"' -f2)
+  
+  if [[ "$CURRENT_CONS_RPC" != *","* ]]; then
+    print_info "检测到单一 RPC 配置，正在添加备用 RPC..."
+    NEW_CONS_RPC="${CURRENT_CONS_RPC},${BACKUP_CONSENSUS_RPC_1}"
+    sed -i "s|L1_CONSENSUS_HOST_URLS=.*|L1_CONSENSUS_HOST_URLS=\"${NEW_CONS_RPC}\"|" "$AZTEC_DIR/.env"
+    print_info "✅ 已添加备用共识层 RPC: $BACKUP_CONSENSUS_RPC_1"
+  else
+    print_info "✅ RPC 配置正常（已配置多 RPC）"
+  fi
+
+  # 2. 重启节点
+  print_info "重启 Aztec 节点以应用配置..."
+  cd "$AZTEC_DIR"
+  docker compose down
+  sleep 5
+  docker compose up -d
+
+  # 3. 等待并检查状态
+  print_info "等待节点启动..."
+  sleep 30
+
+  # 4. 检查端口状态
+  print_info "检查端口监听状态..."
+  RPC_CHECK=$(ss -tulnp | grep ':8080' | wc -l)
+  P2P_CHECK=$(ss -tulnp | grep ':40400' | wc -l)
+
+  if [ "$RPC_CHECK" -gt 0 ]; then
+    print_info "✅ RPC 端口 (8080) 现在正在监听"
+  else
+    print_info "⚠️  RPC 端口 (8080) 仍然未监听，节点可能还在同步"
+  fi
+
+  if [ "$P2P_CHECK" -gt 0 ]; then
+    print_info "✅ P2P 端口 (40400) 现在正在监听"
+  else
+    print_info "⚠️  P2P 端口 (40400) 仍然未监听，节点可能还在同步"
+  fi
+
+  # 5. 显示节点日志
+  print_info "查看节点最新日志..."
+  docker logs aztec-sequencer --tail 10
+
+  print_info "修复完成！建议等待几分钟让节点完全同步。"
+}
+
 # 修复快照同步问题
 fix_snapshot_sync() {
   print_info "检测到快照同步问题，正在应用社区修复方案..."
@@ -745,13 +803,18 @@ check_node_status() {
       echo -e "  ${GREEN} Aztec 容器: 运行中${NC}"
 
       # 检查端口监听
-      if ss -tulnp | grep -q ':8080'; then
+      RPC_PORT_LISTENING=$(ss -tulnp | grep ':8080' | wc -l)
+      P2P_PORT_LISTENING=$(ss -tulnp | grep ':40400' | wc -l)
+      
+      if [ "$RPC_PORT_LISTENING" -gt 0 ]; then
         echo -e "  ${GREEN} RPC 端口 (8080): 监听中${NC}"
       else
         echo -e "  ${YELLOW} RPC 端口 (8080): 未监听${NC}"
+        # 自动修复建议
+        AUTO_FIX_RPC=1
       fi
 
-      if ss -tulnp | grep -q ':40400'; then
+      if [ "$P2P_PORT_LISTENING" -gt 0 ]; then
         echo -e "  ${GREEN} P2P 端口 (40400): 监听中${NC}"
       else
         echo -e "  ${YELLOW} P2P 端口 (40400): 未监听${NC}"
@@ -763,6 +826,16 @@ check_node_status() {
         echo -e "  ${YELLOW} 最近日志: 发现错误${NC}"
       else
         echo -e "  ${GREEN} 最近日志: 正常${NC}"
+      fi
+
+      # 如果端口未监听，提供自动修复选项
+      if [ "${AUTO_FIX_RPC:-0}" -eq 1 ]; then
+        echo
+        echo -e "  ${YELLOW}⚠️  检测到 RPC 端口未监听，可能节点还在同步或需要修复${NC}"
+        read -p "  是否尝试自动修复？(y/n): " fix_rpc
+        if [[ "$fix_rpc" == "y" ]]; then
+          fix_rpc_ports
+        fi
       fi
     else
       echo -e "  ${RED} Aztec 容器: $CONTAINER_STATUS${NC}"
@@ -1070,8 +1143,9 @@ main_menu() {
     echo "7. 检查节点状态"
     echo "8. 设置治理提案投票"
     echo "9. 修复快照同步问题"
-    echo "10. 退出"
-    read -p "请输入选项 (1-10): " choice
+    echo "10. 修复 RPC 端口和配置问题"
+    echo "11. 退出"
+    read -p "请输入选项 (1-11): " choice
 
     case $choice in
       1)
@@ -1120,11 +1194,16 @@ main_menu() {
         fix_snapshot_sync_issue
         ;;
       10)
+        fix_rpc_ports
+        echo "按任意键返回主菜单..."
+        read -n 1
+        ;;
+      11)
         print_info "退出脚本..."
         exit 0
         ;;
       *)
-        print_info "无效输入选项，请重新输入 1-10..."
+        print_info "无效输入选项，请重新输入 1-11..."
         echo "按任意键返回主菜单..."
         read -n 1
         ;;
