@@ -293,6 +293,18 @@ install_and_start_node() {
     read -p " EVM钱包地址（以太坊地址，0x 开头）： " COINBASE
   fi
   read -p " 发布者私钥（可选，0x 开头，按回车跳过）： " PUBLISHER_PRIVATE_KEY
+  
+  # 询问是否设置治理提案投票
+  print_info ""
+  read -p " 是否设置治理提案投票地址？(y/n): " set_governance
+  GOVERNANCE_ADDRESS=""
+  if [[ "$set_governance" == "y" ]]; then
+    GOVERNANCE_ADDRESS="$GOVERNANCE_PROPOSER_PAYLOAD"
+    print_info "治理提案地址已设置为: $GOVERNANCE_ADDRESS"
+  else
+    print_info "跳过治理提案设置，可在稍后通过菜单选项设置。"
+  fi
+  
   BLOB_URL="" # 默认跳过 Blob Sink URL
 
   # 验证输入
@@ -331,6 +343,10 @@ EOF
   if [ -n "$BLOB_URL" ]; then
     echo "BLOB_SINK_URL=\"$BLOB_URL\"" >> "$AZTEC_DIR/.env"
   fi
+  if [ -n "$GOVERNANCE_ADDRESS" ]; then
+    echo "GOVERNANCE_PROPOSER_PAYLOAD_ADDRESS=\"$GOVERNANCE_ADDRESS\"" >> "$AZTEC_DIR/.env"
+    print_info "治理提案投票地址已添加到 .env 文件"
+  fi
   chmod 600 "$AZTEC_DIR/.env"
 
   # 设置启动标志
@@ -344,7 +360,7 @@ EOF
     BLOB_FLAG="--sequencer.blobSinkUrl \$BLOB_SINK_URL"
   fi
 
-  # 生成 docker-compose.yml 文件（包含社区提供的快照URL）
+  # 生成 docker-compose.yml 文件（包含社区提供的快照URL和治理提案配置）
   print_info "生成 $AZTEC_DIR/docker-compose.yml 文件..."
   cat > "$AZTEC_DIR/docker-compose.yml" <<EOF
 services:
@@ -363,6 +379,7 @@ services:
       - LOG_LEVEL=\${LOG_LEVEL}
       - PUBLISHER_PRIVATE_KEY=\${PUBLISHER_PRIVATE_KEY:-}
       - BLOB_SINK_URL=\${BLOB_SINK_URL:-}
+      - GOVERNANCE_PROPOSER_PAYLOAD_ADDRESS=\${GOVERNANCE_PROPOSER_PAYLOAD_ADDRESS:-}
     entrypoint: >
       sh -c "node --no-warnings /usr/src/yarn-project/aztec/dest/bin/index.js start --network alpha-testnet --node --archiver --sequencer --snapshots-url $SNAPSHOT_URL_1 $VALIDATOR_FLAG $PUBLISHER_FLAG \${BLOB_FLAG:-}"
     volumes:
@@ -400,6 +417,11 @@ EOF
   print_info "  - 查看日志：docker logs -f aztec-sequencer"
   print_info "  - 配置目录：$AZTEC_DIR"
   print_info "  - 数据目录：$DATA_DIR"
+  if [ -n "$GOVERNANCE_ADDRESS" ]; then
+    print_info "  - 治理提案投票：已配置 ($GOVERNANCE_ADDRESS)"
+  else
+    print_info "  - 治理提案投票：未配置（可通过菜单选项8设置）"
+  fi
 }
 
 # 停止、删除 Docker（包括旧版本）、更新节点并重新创建 Docker
@@ -733,6 +755,7 @@ check_node_status() {
   if [ -f "$AZTEC_DIR/.env" ]; then
     ETH_RPC=$(grep "ETHEREUM_HOSTS" "$AZTEC_DIR/.env" | cut -d'"' -f2)
     CONS_RPC=$(grep "L1_CONSENSUS_HOST_URLS" "$AZTEC_DIR/.env" | cut -d'"' -f2)
+    GOVERNANCE_ADDRESS=$(grep "GOVERNANCE_PROPOSER_PAYLOAD_ADDRESS" "$AZTEC_DIR/.env" | cut -d'"' -f2 2>/dev/null || echo "")
 
     if [ -n "$ETH_RPC" ]; then
       echo -e "  ${BLUE} 执行层 RPC: $ETH_RPC${NC}"
@@ -778,6 +801,13 @@ check_node_status() {
       fi
     else
       echo -e "  ${YELLOW} 共识层 RPC: 未配置${NC}"
+    fi
+
+    # 显示治理提案状态
+    if [ -n "$GOVERNANCE_ADDRESS" ]; then
+      echo -e "  ${GREEN} 治理提案: 已配置${NC}"
+    else
+      echo -e "  ${YELLOW} 治理提案: 未配置${NC}"
     fi
   else
     echo -e "  ${YELLOW} Ethereum 节点: 未配置 (.env 文件不存在)${NC}"
@@ -873,11 +903,21 @@ check_node_status() {
     echo -e "${GREEN}   • Aztec 节点: 运行中${NC}"
     echo -e "${GREEN}   • Ethereum 执行层: 连接正常${NC}"
     echo -e "${GREEN}   • Ethereum 共识层: 连接正常${NC}"
+    if [ -n "$GOVERNANCE_ADDRESS" ]; then
+      echo -e "${GREEN}   • 治理提案投票: 已配置${NC}"
+    else
+      echo -e "${YELLOW}   • 治理提案投票: 未配置${NC}"
+    fi
   elif [ $TOTAL_STATUS -ge 1 ]; then
     echo -e "${YELLOW} 部分服务运行中 ($TOTAL_STATUS/3)${NC}"
     [ $AZTEC_RUNNING -eq 1 ] && echo -e "${GREEN}   • Aztec 节点: 运行中${NC}" || echo -e "${RED}   • Aztec 节点: 未运行${NC}"
     [ $ETH_CONNECTION -eq 1 ] && echo -e "${GREEN}   • Ethereum 执行层: 连接正常${NC}" || echo -e "${RED}   • Ethereum 执行层: 连接失败${NC}"
     [ $CONS_CONNECTION -eq 1 ] && echo -e "${GREEN}   • Ethereum 共识层: 连接正常${NC}" || echo -e "${RED}   • Ethereum 共识层: 连接失败${NC}"
+    if [ -n "$GOVERNANCE_ADDRESS" ]; then
+      echo -e "${GREEN}   • 治理提案投票: 已配置${NC}"
+    else
+      echo -e "${YELLOW}   • 治理提案投票: 未配置${NC}"
+    fi
   else
     echo -e "${RED} 所有服务均未运行${NC}"
   fi
@@ -892,9 +932,9 @@ vote_governance_proposal() {
   print_info "=== 投票治理提案 ==="
   
   print_info "治理提案地址: $GOVERNANCE_PROPOSER_PAYLOAD"
-  print_info "此操作将向本地 Aztec 节点发送治理提案投票信号。"
+  print_info "此操作将通过环境变量设置治理提案投票。"
   
-  read -p "是否继续投票？(y/n): " confirm
+  read -p "是否继续设置治理提案投票？(y/n): " confirm
   if [[ "$confirm" != "y" ]]; then
     print_info "已取消投票操作。"
     echo "按任意键返回主菜单..."
@@ -902,44 +942,39 @@ vote_governance_proposal() {
     return
   fi
 
-  # 检查节点是否运行
-  if ! docker ps -q -f name=aztec-sequencer | grep -q .; then
-    print_info "错误：Aztec 节点未运行，请先启动节点。"
+  # 检查配置目录是否存在
+  if [ ! -f "$AZTEC_DIR/.env" ]; then
+    print_info "错误：未找到 $AZTEC_DIR/.env 文件，请先安装并启动节点。"
     echo "按任意键返回主菜单..."
     read -n 1
     return
   fi
 
-  # 检查 curl 是否可用
-  if ! check_command curl; then
-    print_info "安装 curl..."
-    update_apt
-    install_package curl
+  # 添加治理提案地址到 .env 文件
+  if grep -q "GOVERNANCE_PROPOSER_PAYLOAD_ADDRESS" "$AZTEC_DIR/.env"; then
+    # 如果已经存在，更新值
+    sed -i "s|GOVERNANCE_PROPOSER_PAYLOAD_ADDRESS=.*|GOVERNANCE_PROPOSER_PAYLOAD_ADDRESS=\"$GOVERNANCE_PROPOSER_PAYLOAD\"|" "$AZTEC_DIR/.env"
+    print_info "已更新治理提案地址。"
+  else
+    # 如果不存在，添加新行
+    echo "GOVERNANCE_PROPOSER_PAYLOAD_ADDRESS=\"$GOVERNANCE_PROPOSER_PAYLOAD\"" >> "$AZTEC_DIR/.env"
+    print_info "已添加治理提案地址到 .env 文件。"
   fi
 
-  print_info "正在发送治理提案投票信号..."
+  print_info "✅ 治理提案投票已通过环境变量设置！"
+  print_info "注意：此配置将在节点重启后生效。"
   
-  # 执行投票命令
-  VOTE_RESPONSE=$(curl -s -X POST http://localhost:8080 \
-    -H 'Content-Type: application/json' \
-    -d '{
-      "jsonrpc":"2.0",
-      "method":"nodeAdmin_setConfig",
-      "params":[{"governanceProposerPayload":"'"$GOVERNANCE_PROPOSER_PAYLOAD"'"}],
-      "id":1
-    }')
-
-  print_info "投票响应: $VOTE_RESPONSE"
-
-  # 检查响应
-  if echo "$VOTE_RESPONSE" | grep -q '"result":'; then
-    print_info "✅ 治理提案投票成功！"
-    print_info "注意：此配置在节点重启后不会持久化。"
-    print_info "如需持久化，请在启动时设置环境变量："
-    print_info "GOVERNANCE_PROPOSER_PAYLOAD_ADDRESS=$GOVERNANCE_PROPOSER_PAYLOAD"
+  read -p "是否立即重启节点使配置生效？(y/n): " restart_confirm
+  if [[ "$restart_confirm" == "y" ]]; then
+    print_info "正在重启节点..."
+    cd "$AZTEC_DIR"
+    docker compose down
+    docker compose up -d
+    print_info "节点已重启，治理提案投票配置已生效。"
+    print_info "查看节点状态：docker logs -f aztec-sequencer --tail 20"
   else
-    print_info "❌ 治理提案投票失败，请检查节点状态和日志。"
-    print_info "错误详情: $VOTE_RESPONSE"
+    print_info "请手动重启节点以使治理提案投票配置生效。"
+    print_info "重启命令：cd $AZTEC_DIR && docker compose restart"
   fi
 
   echo "按任意键返回主菜单..."
@@ -986,7 +1021,7 @@ main_menu() {
     echo "5. 注册验证者"
     echo "6. 删除 Docker 容器和节点数据"
     echo "7. 检查节点状态"
-    echo "8. 投票治理提案"
+    echo "8. 设置治理提案投票"
     echo "9. 修复快照同步问题"
     echo "10. 退出"
     read -p "请输入选项 (1-10): " choice
