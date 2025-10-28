@@ -177,72 +177,56 @@ validate_private_keys() {
   done
 }
 
-# ==================== 终极修复版：执行治理提案投票 ====================
+# ==================== 终极版：执行治理提案投票 ====================
 vote_governance_proposal() {
   print_info "=== 执行治理提案投票（2.0.4） ==="
 
-  # 检查容器是否运行
   if ! docker ps -q -f name=aztec-sequencer | grep -q .; then
-    print_info "错误：容器 aztec-sequencer 未运行，请先启动节点（选项 1）。"
-    echo "按任意键返回主菜单..."
+    print_info "错误：容器 aztec-sequencer 未运行，请先启动节点。"
     read -n 1
     return
   fi
 
-  # 确认操作
-  read -p "警告：此操作将向节点发送治理提案信号，确认继续？(y/n): " confirm
-  [[ "$confirm" != "y" ]] && { print_info "已取消投票。"; echo "按任意键返回主菜单..."; read -n 1; return; }
+  read -p "确认发送治理提案信号？(y/n): " confirm
+  [[ "$confirm" != "y" ]] && { print_info "已取消。"; read -n 1; return; }
 
-  print_info "正在通过容器内部执行投票..."
+  print_info "正在发送投票信号..."
 
-  # 关键修复：使用 sh -c + || echo 防止中断
   RESPONSE=""
-  set +e  # 临时禁用 set -e
+  set +e
   RESPONSE=$(docker exec aztec-sequencer sh -c "\
     curl -s --connect-timeout 15 \
       -X POST http://127.0.0.1:8880 \
       -H 'Content-Type: application/json' \
       -d '{\"jsonrpc\":\"2.0\",\"method\":\"nodeAdmin_setConfig\",\"params\":[{\"governanceProposerPayload\":\"$GOVERNANCE_PAYLOAD\"}],\"id\":1}' \
-    || echo '{\"error\":\"curl failed or timeout\"}'" 2>/dev/null || echo '{"error":"docker exec failed"}')
-  set -e  # 恢复 set -e
+    || echo '{\"error\":\"curl failed\"}'" 2>/dev/null || echo '{"error":"exec failed"}')
+  set -e
 
-  print_info "原始返回: $RESPONSE"
+  print_info "返回: $RESPONSE"
 
-  # 检查返回结果
   if echo "$RESPONSE" | grep -q '"result":true'; then
-    print_info "投票成功！治理提案已信号。"
-    print_info "Payload: $GOVERNANCE_PAYLOAD"
+    print_info "投票成功！治理提案已信号"
   elif echo "$RESPONSE" | grep -q "method not found"; then
-    print_info "失败：nodeAdmin_setConfig 方法未找到。"
-    print_info "请执行 选项 4 升级到 2.0.4 并重启节点"
-  elif echo "$RESPONSE" | grep -q "curl failed\|timeout\|docker exec failed"; then
-    print_info "失败：无法连接到 admin RPC (8880)"
-    print_info "请检查："
-    print_info "  1. docker logs aztec-sequencer | grep 'Admin RPC'"
-    print_info "  2. ss -tulnp | grep 8880"
-  elif [ -z "$RESPONSE" ] || [[ "$RESPONSE" == "null" ]]; then
-    print_info "失败：空响应，请检查节点日志"
+    print_info "失败：方法未找到，请升级到 2.0.4"
+  elif echo "$RESPONSE" | grep -q "curl failed\|exec failed"; then
+    print_info "失败：无法连接 admin RPC"
+    print_info "检查：docker logs aztec-sequencer | grep 'Admin RPC'"
   else
-    print_info "投票失败，返回：$RESPONSE"
+    print_info "投票失败：$RESPONSE"
   fi
 
-  # 写入 .env 持久化环境变量
-  ENV_FILE="$AZTEC_DIR/.env"
-  if [ -f "$ENV_FILE" ] && ! grep -q "GOVERNANCE_PROPOSER_PAYLOAD_ADDRESS" "$ENV_FILE"; then
-    echo "GOVERNANCE_PROPOSER_PAYLOAD_ADDRESS=\"$GOVERNANCE_PAYLOAD\"" >> "$ENV_FILE"
-    print_info "已写入环境变量（重启后仍生效）。"
+  if [ -f "$AZTEC_DIR/.env" ] && ! grep -q "GOVERNANCE" "$AZTEC_DIR/.env"; then
+    echo "GOVERNANCE_PROPOSER_PAYLOAD_ADDRESS=\"$GOVERNANCE_PAYLOAD\"" >> "$AZTEC_DIR/.env"
+    print_info "已写入环境变量"
   fi
 
-  print_info "投票流程结束。"
-  echo "按任意键返回主菜单..."
   read -n 1
 }
 
-# 主逻辑：安装和启动 Aztec 节点（启用 admin RPC）
+# ==================== 安装启动（启用 admin RPC） ====================
 install_and_start_node() {
-  print_info "清理旧配置和数据..."
-  rm -rf "$AZTEC_DIR/.env" "$AZTEC_DIR/docker-compose.yml"
-  rm -rf /tmp/aztec-world-state-* "$DATA_DIR"
+  print_info "清理旧数据..."
+  rm -rf "$AZTEC_DIR" "$DATA_DIR" /tmp/aztec-world-state-*
   docker stop aztec-sequencer 2>/dev/null || true
   docker rm aztec-sequencer 2>/dev/null || true
 
@@ -252,35 +236,24 @@ install_and_start_node() {
   install_aztec_cli
   check_aztec_image_version
 
-  print_info "创建 Aztec 配置目录 $AZTEC_DIR..."
-  mkdir -p "$AZTEC_DIR"
-  chmod -R 755 "$AZTEC_DIR"
+  mkdir -p "$AZTEC_DIR" "$DATA_DIR"
+  chmod -R 755 "$AZTEC_DIR" "$DATA_DIR"
 
-  print_info "配置防火墙..."
-  ufw allow 40400/tcp >/dev/null 2>&1
-  ufw allow 40400/udp >/dev/null 2>&1
-  ufw allow 8080/tcp >/dev/null 2>&1
+  ufw allow 40400/tcp,40400/udp,8080/tcp >/dev/null 2>&1
 
-  ETH_RPC="${ETH_RPC:-}"
-  CONS_RPC="${CONS_RPC:-}"
-  VALIDATOR_PRIVATE_KEYS="${VALIDATOR_PRIVATE_KEYS:-}"
-  COINBASE="${COINBASE:-}"
-  PUBLISHER_PRIVATE_KEY="${PUBLISHER_PRIVATE_KEY:-}"
+  read -p "L1 EL RPC: " ETH_RPC
+  read -p "L1 CL RPC: " CONS_RPC
+  read -p "验证者私钥（逗号分隔）: " VALIDATOR_PRIVATE_KEYS
+  read -p "COINBASE 地址: " COINBASE
+  read -p "发布者私钥（可选）: " PUBLISHER_PRIVATE_KEY
 
-  if [ -z "$ETH_RPC" ]; then read -p " L1 执行客户端（EL）RPC URL： " ETH_RPC; fi
-  if [ -z "$CONS_RPC" ]; then read -p " L1 共识（CL）RPC URL： " CONS_RPC; fi
-  if [ -z "$VALIDATOR_PRIVATE_KEYS" ]; then read -p " 验证者私钥（多个用逗号分隔）： " VALIDATOR_PRIVATE_KEYS; fi
-  if [ -z "$COINBASE" ]; then read -p " EVM钱包地址（0x...）： " COINBASE; fi
-  read -p " 发布者私钥（可选，回车跳过）： " PUBLISHER_PRIVATE_KEY
-
-  validate_url "$ETH_RPC" "L1 执行客户端 RPC"
-  validate_url "$CONS_RPC" "L1 共识客户端 RPC"
-  validate_private_keys "$VALIDATOR_PRIVATE_KEYS" "验证者私钥"
-  validate_address "$COINBASE" "COINBASE 地址"
-  [ -n "$PUBLISHER_PRIVATE_KEY" ] && validate_private_key "$PUBLISHER_PRIVATE_KEY" "发布者私钥"
+  validate_url "$ETH_RPC" "EL"
+  validate_url "$CONS_RPC" "CL"
+  validate_private_keys "$VALIDATOR_PRIVATE_KEYS"
+  validate_address "$COINBASE"
+  [ -n "$PUBLISHER_PRIVATE_KEY" ] && validate_private_key "$PUBLISHER_PRIVATE_KEY"
 
   PUBLIC_IP=$(curl -s ifconfig.me || echo "127.0.0.1")
-  print_info "公共 IP: $PUBLIC_IP"
 
   cat > "$AZTEC_DIR/.env" <<EOF
 ETHEREUM_HOSTS="$ETH_RPC"
@@ -292,7 +265,6 @@ DATA_DIRECTORY="/data"
 LOG_LEVEL="debug"
 EOF
   [ -n "$PUBLISHER_PRIVATE_KEY" ] && echo "PUBLISHER_PRIVATE_KEY=\"$PUBLISHER_PRIVATE_KEY\"" >> "$AZTEC_DIR/.env"
-  chmod 600 "$AZTEC_DIR/.env"
 
   VALIDATOR_FLAG=""
   [ -n "$VALIDATOR_PRIVATE_KEYS" ] && VALIDATOR_FLAG="--sequencer.validatorPrivateKeys \$VALIDATOR_PRIVATE_KEYS"
@@ -324,133 +296,61 @@ services:
           --sequencer \
           $VALIDATOR_FLAG \
           $PUBLISHER_FLAG \
-          --api.admin-rpc-http-host 0.0.0.0 \
-          --api.admin-rpc-http-port 8880
+          --node.admin-rpc-http-enabled true
       "
     volumes:
-      - /root/.aztec/alpha-testnet/data/:/data
+      - $DATA_DIR:/data
 EOF
-  chmod 644 "$AZTEC_DIR/docker-compose.yml"
 
-  mkdir -p "$DATA_DIR"
-  chmod -R 755 "$DATA_DIR"
-
-  print_info "启动 Aztec 全节点（已启用 admin RPC）..."
   cd "$AZTEC_DIR"
-  docker compose up -d || docker-compose up -d
-
-  print_info "安装完成！"
-  print_info "请在 30 秒后执行 选项 9 完成投票！"
+  docker compose up -d
+  print_info "节点启动成功！等待 30 秒后执行 选项 9 投票"
 }
 
-# 停止、删除、更新、重启
+# ==================== 升级重启 ====================
 stop_delete_update_restart_node() {
-  print_info "=== 升级到 2.0.4 并重新创建容器 ==="
-  read -p "确认继续？(y/n): " confirm
-  [[ "$confirm" != "y" ]] && return
-
-  [ -f "$AZTEC_DIR/docker-compose.yml" ] || { print_info "未找到配置，请先安装。"; return; }
-
-  sed -i "s|image: .*|image: $AZTEC_IMAGE|" "$AZTEC_DIR/docker-compose.yml" 2>/dev/null || true
-  docker stop aztec-sequencer 2>/dev/null || true
-  docker rm aztec-sequencer 2>/dev/null || true
-  docker rmi "$OLD_AZTEC_IMAGE" 2>/dev/null || true
-  docker pull "$AZTEC_IMAGE"
-  cd "$AZTEC_DIR"
-  docker compose up -d || docker-compose up -d
-  print_info "升级完成！请等待 30 秒后执行选项 9 投票。"
+  print_info "升级到 2.0.4 并启用 admin RPC..."
+  read -p "继续？(y/n): " c; [[ "$c" != "y" ]] && return
+  install_and_start_node
 }
 
-# 获取区块高度和同步证明
+# ==================== 其他功能 ====================
 get_block_and_proof() {
-  check_command jq || { update_apt; install_package jq; }
-  [ -f "$AZTEC_DIR/docker-compose.yml" ] || { print_info "未找到配置。"; return; }
-  docker ps -q -f name=aztec-sequencer | grep -q . || { print_info "容器未运行。"; return; }
-
-  BLOCK_NUMBER=$(curl -s -X POST -H 'Content-Type: application/json' \
-    -d '{"jsonrpc":"2.0","method":"node_getL2Tips","params":[],"id":67}' \
-    http://localhost:8080 | jq -r ".result.proven.number")
-
-  [ -z "$BLOCK_NUMBER" ] || [ "$BLOCK_NUMBER" = "null" ] && { print_info "无法获取区块高度。"; return; }
-  print_info "当前区块高度：$BLOCK_NUMBER"
-
-  PROOF=$(curl -s -X POST -H 'Content-Type: application/json' \
-    -d "$(jq -n --arg bn "$BLOCK_NUMBER" '{"jsonrpc":"2.0","method":"node_getArchiveSiblingPath","params":[$bn,$bn],"id":67}')" \
-    http://localhost:8080 | jq -r ".result")
-  [ -n "$PROOF" ] && [ "$PROOF" != "null" ] && print_info "同步证明：$PROOF"
+  check_command jq || install_package jq
+  BLOCK=$(curl -s -X POST http://localhost:8080 -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","method":"node_getL2Tips","id":1}' | jq -r '.result.proven.number')
+  print_info "区块高度: $BLOCK"
 }
 
-# 注册验证者
-register_validator() {
-  print_info "[注册验证者]"
-  read -p "继续？(y/n): " confirm; [[ "$confirm" != "y" ]] && return
-  read -p "以太坊私钥： " L1_PRIVATE_KEY
-  read -p "验证者地址： " VALIDATOR_ADDRESS
-  read -p "L1 RPC： " L1_RPC
-
-  validate_private_key "$L1_PRIVATE_KEY" "私钥"
-  validate_address "$VALIDATOR_ADDRESS" "地址"
-  validate_url "$L1_RPC" "RPC"
-
-  export PATH="$HOME/.aztec/bin:$PATH"
-  aztec add-l1-validator \
-    --l1-rpc-urls "$L1_RPC" \
-    --private-key "$L1_PRIVATE_KEY" \
-    --attester "$VALIDATOR_ADDRESS" \
-    --proposer-eoa "$VALIDATOR_ADDRESS" \
-    --staking-asset-handler "0xF739D03e98e23A7B65940848aBA8921fF3bAc4b2" \
-    --l1-chain-id 11155111 && print_info "注册成功！"
-}
-
-# 删除所有
-delete_docker_and_node() {
-  print_info "=== 删除所有数据 ==="
-  read -p "确认？(y/n): " confirm; [[ "$confirm" != "y" ]] && return
-  docker stop aztec-sequencer 2>/dev/null || true
-  docker rm aztec-sequencer 2>/dev/null || true
-  docker rmi $(docker images -q aztecprotocol/aztec | sort -u) 2>/dev/null || true
-  rm -rf "$AZTEC_DIR" "$DATA_DIR" /tmp/aztec-world-state-* "$HOME/.aztec"
-  print_info "清理完成。"
-}
-
-# 检查节点状态
 check_node_status() {
   print_info "检查中..."
   docker ps | grep aztec-sequencer && print_info "容器运行中" || print_info "容器未运行"
   ss -tulnp | grep -q ':8080' && print_info "RPC 8080 监听" || print_info "RPC 未监听"
   ss -tulnp | grep -q ':8880' && print_info "Admin RPC 8880 监听" || print_info "Admin RPC 未监听"
-  docker logs aztec-sequencer --tail 10 | grep -i "Admin RPC" || true
+  docker logs aztec-sequencer --tail 5 | grep -i "Admin RPC" || true
 }
 
-# 主菜单
+# ==================== 主菜单 ====================
 main_menu() {
   while true; do
     clear
-    echo "Aztec 节点管理脚本（支持 2.0.4 升级 + 投票）"
-    echo "脚本由哈哈哈哈编写，推特 @ferdie_jhovie"
-    echo "========================================"
-    echo "1. 安装并启动 Aztec 节点（2.0.4）"
-    echo "2. 查看节点日志"
-    echo "3. 获取区块高度和同步证明"
-    echo "4. 停止、删除、升级到 2.0.4 并重启"
-    echo "5. 注册验证者"
-    echo "6. 删除所有数据"
+    echo "=== Aztec 节点管理（2.0.4 + 投票）==="
+    echo "1. 安装并启动节点（启用 admin RPC）"
+    echo "2. 查看日志"
+    echo "3. 获取区块高度"
+    echo "4. 升级到 2.0.4 并重启"
     echo "7. 检查节点状态"
-    echo "9. 执行治理提案投票（2.0.4）"
+    echo "9. 执行治理提案投票"
     echo "8. 退出"
-    read -p "请输入选项 (1-9): " choice
-
+    read -p "选择: " choice
     case $choice in
       1) install_and_start_node; read -n 1 ;;
       2) docker logs -f --tail 100 aztec-sequencer; read -n 1 ;;
       3) get_block_and_proof; read -n 1 ;;
       4) stop_delete_update_restart_node; read -n 1 ;;
-      5) register_validator; read -n 1 ;;
-      6) delete_docker_and_node; read -n 1 ;;
       7) check_node_status; read -n 1 ;;
       9) vote_governance_proposal; read -n 1 ;;
       8) exit 0 ;;
-      *) print_info "无效选项"; read -n 1 ;;
+      *) print_info "无效"; read -n 1 ;;
     esac
   done
 }
