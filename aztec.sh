@@ -223,13 +223,52 @@ check_node_status() {
     
     # 检查 RPC 配置
     if grep -q "ETHEREUM_HOSTS" "$AZTEC_DIR/.env"; then
+      ETH_RPC=$(grep "ETHEREUM_HOSTS" "$AZTEC_DIR/.env" | cut -d= -f2 | tr -d '"' | tr -d ' ' | head -1)
       echo "✅ 执行层 RPC: 已配置"
+      echo "   📍 $ETH_RPC"
+      
+      # 测试执行层 RPC 连接
+      print_info "测试执行层 RPC 连接..."
+      ETH_RPC_STATUS=$(curl -s -X POST -H "Content-Type: application/json" --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' "$ETH_RPC" 2>/dev/null | grep -o '"result"' || echo "failed")
+      if [ "$ETH_RPC_STATUS" = '"result"' ]; then
+        echo "   ✅ 执行层 RPC: 连接正常"
+        
+        # 获取执行层最新区块
+        ETH_BLOCK_HEX=$(curl -s -X POST -H "Content-Type: application/json" --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' "$ETH_RPC" 2>/dev/null | grep -o '"result":"[^"]*"' | cut -d'"' -f4)
+        if [ -n "$ETH_BLOCK_HEX" ]; then
+          ETH_BLOCK_DEC=$((16#${ETH_BLOCK_HEX#0x}))
+          echo "   📦 最新区块: $ETH_BLOCK_DEC"
+        fi
+      else
+        echo "   ❌ 执行层 RPC: 连接失败"
+      fi
     else
       echo "❌ 执行层 RPC: 未配置"
     fi
 
     if grep -q "L1_CONSENSUS_HOST_URLS" "$AZTEC_DIR/.env"; then
+      CONS_RPC=$(grep "L1_CONSENSUS_HOST_URLS" "$AZTEC_DIR/.env" | cut -d= -f2 | tr -d '"' | tr -d ' ' | head -1)
       echo "✅ 共识层 RPC: 已配置"
+      echo "   📍 $CONS_RPC"
+      
+      # 测试共识层 RPC 连接
+      print_info "测试共识层 RPC 连接..."
+      CONS_RPC_STATUS=$(curl -s -X GET "$CONS_RPC/eth/v1/node/health" 2>/dev/null | head -1 | grep -o "200" || echo "failed")
+      if [ "$CONS_RPC_STATUS" = "200" ]; then
+        echo "   ✅ 共识层 RPC: 连接正常"
+        
+        # 获取共识层同步状态
+        SYNC_STATUS=$(curl -s -X GET "$CONS_RPC/eth/v1/node/syncing" 2>/dev/null | grep -o '"is_syncing":[^,]*' | cut -d':' -f2 | tr -d ' ' || echo "unknown")
+        if [ "$SYNC_STATUS" = "false" ]; then
+          echo "   📊 同步状态: 已同步"
+        elif [ "$SYNC_STATUS" = "true" ]; then
+          echo "   📊 同步状态: 同步中"
+        else
+          echo "   📊 同步状态: 未知"
+        fi
+      else
+        echo "   ❌ 共识层 RPC: 连接失败"
+      fi
     else
       echo "❌ 共识层 RPC: 未配置"
     fi
@@ -272,14 +311,33 @@ check_node_status() {
   fi
 
   echo
+  echo "=== 网络连接 ==="
+  
+  # 检查网络连接
+  if ping -c 1 -W 3 google.com &>/dev/null; then
+    echo "🌐 互联网连接: 正常"
+  else
+    echo "🌐 互联网连接: 异常"
+  fi
+
+  # 检查 Docker 服务状态
+  if systemctl is-active --quiet docker; then
+    echo "🐳 Docker 服务: 运行中"
+  else
+    echo "🐳 Docker 服务: 未运行"
+  fi
+
+  echo
   echo "=== 建议操作 ==="
   if docker ps -q -f name=aztec-sequencer | grep -q .; then
     echo "1. 查看详细日志 (选项 2)"
     echo "2. 检查区块高度 (选项 3)"
-    echo "3. 如遇问题可重启节点"
+    echo "3. 如遇 RPC 连接问题，请检查网络或更换 RPC 服务商"
+    echo "4. 如遇问题可重启节点"
   else
     echo "1. 安装并启动节点 (选项 1)"
     echo "2. 检查配置文件"
+    echo "3. 确认 RPC 服务可用性"
   fi
 
   echo
