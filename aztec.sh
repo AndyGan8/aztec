@@ -426,11 +426,11 @@ EOF
   fi
   chmod 600 "$AZTEC_DIR/.env"
 
-  # 设置启动标志
+  # 设置启动标志 - 修复参数名称
   VALIDATOR_FLAG="--sequencer.validatorPrivateKeys \$VALIDATOR_PRIVATE_KEYS"
   PUBLISHER_FLAG=""
   if [ -n "$PUBLISHER_PRIVATE_KEY" ]; then
-    PUBLISHER_FLAG="--sequencer.publisherPrivateKey \$PUBLISHER_PRIVATE_KEY"
+    PUBLISHER_FLAG="--sequencer.publisherPrivateKeys \$PUBLISHER_PRIVATE_KEY"  # 修复：改为 publisherPrivateKeys
   fi
   BLOB_FLAG=""
   if [ -n "$BLOB_URL" ]; then
