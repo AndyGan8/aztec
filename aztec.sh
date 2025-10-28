@@ -16,6 +16,9 @@ DATA_DIR="/root/.aztec/alpha-testnet/data"
 AZTEC_IMAGE="aztecprotocol/aztec:2.0.4"  # 更新为 2.0.4
 OLD_AZTEC_IMAGE="aztecprotocol/aztec:2.0.2"  # 旧版本为 2.0.2
 GOVERNANCE_PROPOSER_PAYLOAD="0xDCd9DdeAbEF70108cE02576df1eB333c4244C666"
+# 社区提供的快照URL解决方案
+SNAPSHOT_URL_1="https://snapshots.aztec.graphops.xyz/files/"
+SNAPSHOT_URL_2="https://files5.blacknodes.net/Aztec/"
 
 # 函数：打印信息
 print_info() {
@@ -105,7 +108,7 @@ install_nodejs() {
 # 检查 Aztec 镜像版本
 check_aztec_image_version() {
   print_info "检查当前 Aztec 镜像版本..."
-  if docker images "$AZTEC_IMAGE" | grep -q "1.2.1"; then  # 更新为检查 1.2.1
+  if docker images "$AZTEC_IMAGE" | grep -q "2.0.4"; then
     print_info "Aztec 镜像 $AZTEC_IMAGE 已存在。"
   else
     print_info "拉取最新 Aztec 镜像 $AZTEC_IMAGE..."
@@ -128,8 +131,8 @@ install_aztec_cli() {
     echo "Aztec CLI 安装失败，未找到 aztec-up 命令。"
     exit 1
   fi
-  if ! aztec-up alpha-testnet 1.2.1; then  # 更新为 1.2.1
-    echo "错误：aztec-up alpha-testnet 1.2.1 命令执行失败，请检查网络或 Aztec CLI 安装。"
+  if ! aztec-up alpha-testnet 2.0.4; then
+    echo "错误：aztec-up alpha-testnet 2.0.4 命令执行失败，请检查网络或 Aztec CLI 安装。"
     exit 1
   fi
 }
@@ -175,6 +178,55 @@ validate_private_keys() {
       exit 1
     fi
   done
+}
+
+# 修复快照同步问题
+fix_snapshot_sync() {
+  print_info "检测到快照同步问题，正在应用社区修复方案..."
+  
+  # 停止容器
+  cd "$AZTEC_DIR"
+  docker compose down
+  
+  # 选择快照URL
+  print_info "请选择快照URL源："
+  echo "1. $SNAPSHOT_URL_1 (推荐)"
+  echo "2. $SNAPSHOT_URL_2"
+  read -p "请输入选择 (1 或 2): " snapshot_choice
+  
+  local selected_url=""
+  case $snapshot_choice in
+    1)
+      selected_url="$SNAPSHOT_URL_1"
+      ;;
+    2)
+      selected_url="$SNAPSHOT_URL_2"
+      ;;
+    *)
+      selected_url="$SNAPSHOT_URL_1"
+      print_info "使用默认选项 1"
+      ;;
+  esac
+  
+  # 修改docker-compose.yml添加快照URL参数
+  if grep -q "snapshots-url" "$AZTEC_DIR/docker-compose.yml"; then
+    # 如果已经存在，更新URL
+    sed -i "s|--snapshots-url [^ ]*|--snapshots-url $selected_url|" "$AZTEC_DIR/docker-compose.yml"
+  else
+    # 如果不存在，添加参数
+    sed -i "s|--sequencer|--sequencer --snapshots-url $selected_url|" "$AZTEC_DIR/docker-compose.yml"
+  fi
+  
+  print_info "已应用快照URL修复: $selected_url"
+  
+  # 重新启动
+  docker compose pull
+  docker compose up -d
+  
+  print_info "节点已重新启动，请查看日志确认快照同步是否正常..."
+  echo "按任意键查看日志..."
+  read -n 1
+  docker logs -f aztec-sequencer --tail 50
 }
 
 # 主逻辑：安装和启动 Aztec 节点
@@ -292,7 +344,7 @@ EOF
     BLOB_FLAG="--sequencer.blobSinkUrl \$BLOB_SINK_URL"
   fi
 
-  # 生成 docker-compose.yml 文件
+  # 生成 docker-compose.yml 文件（包含社区提供的快照URL）
   print_info "生成 $AZTEC_DIR/docker-compose.yml 文件..."
   cat > "$AZTEC_DIR/docker-compose.yml" <<EOF
 services:
@@ -312,7 +364,7 @@ services:
       - PUBLISHER_PRIVATE_KEY=\${PUBLISHER_PRIVATE_KEY:-}
       - BLOB_SINK_URL=\${BLOB_SINK_URL:-}
     entrypoint: >
-      sh -c "node --no-warnings /usr/src/yarn-project/aztec/dest/bin/index.js start --network alpha-testnet --node --archiver --sequencer $VALIDATOR_FLAG $PUBLISHER_FLAG \${BLOB_FLAG:-}"
+      sh -c "node --no-warnings /usr/src/yarn-project/aztec/dest/bin/index.js start --network alpha-testnet --node --archiver --sequencer --snapshots-url $SNAPSHOT_URL_1 $VALIDATOR_FLAG $PUBLISHER_FLAG \${BLOB_FLAG:-}"
     volumes:
       - /root/.aztec/alpha-testnet/data/:/data
 EOF
@@ -391,7 +443,7 @@ stop_delete_update_restart_node() {
     print_info "未找到运行中的 aztec-sequencer 容器。"
   fi
 
-  # 删除旧版本镜像 aztecprotocol/aztec:1.2.0
+  # 删除旧版本镜像
   print_info "删除旧版本 Aztec 镜像 $OLD_AZTEC_IMAGE..."
   if docker images -q "$OLD_AZTEC_IMAGE" | grep -q .; then
     docker rmi "$OLD_AZTEC_IMAGE" 2>/dev/null || true
@@ -401,14 +453,14 @@ stop_delete_update_restart_node() {
   fi
 
   # 更新 Aztec CLI
-  print_info "更新 Aztec CLI 到 1.2.1..."
+  print_info "更新 Aztec CLI 到 2.0.4..."
   export PATH="$HOME/.aztec/bin:$PATH"
   if ! check_command aztec-up; then
     echo "错误：未找到 aztec-up 命令，正在尝试重新安装 Aztec CLI..."
     install_aztec_cli
   else
-    if ! aztec-up alpha-testnet 1.2.1; then  # 更新为 1.2.1
-      echo "错误：aztec-up alpha-testnet 1.2.1 失败，请检查网络或 Aztec CLI 安装。"
+    if ! aztec-up alpha-testnet 2.0.4; then
+      echo "错误：aztec-up alpha-testnet 2.0.4 失败，请检查网络或 Aztec CLI 安装。"
       echo "按任意键返回主菜单..."
       read -n 1
       return
@@ -894,6 +946,30 @@ vote_governance_proposal() {
   read -n 1
 }
 
+# 修复快照同步问题函数
+fix_snapshot_sync_issue() {
+  print_info "=== 修复快照同步问题 ==="
+  
+  if [ ! -f "$AZTEC_DIR/docker-compose.yml" ]; then
+    print_info "错误：未找到 $AZTEC_DIR/docker-compose.yml 文件，请先安装并启动节点。"
+    echo "按任意键返回主菜单..."
+    read -n 1
+    return
+  fi
+
+  read -p "此操作将应用社区提供的快照URL修复方案，是否继续？(y/n): " confirm
+  if [[ "$confirm" != "y" ]]; then
+    print_info "已取消修复操作。"
+    echo "按任意键返回主菜单..."
+    read -n 1
+    return
+  fi
+
+  fix_snapshot_sync
+  echo "按任意键返回主菜单..."
+  read -n 1
+}
+
 # 主菜单函数
 main_menu() {
   while true; do
@@ -911,8 +987,9 @@ main_menu() {
     echo "6. 删除 Docker 容器和节点数据"
     echo "7. 检查节点状态"
     echo "8. 投票治理提案"
-    echo "9. 退出"
-    read -p "请输入选项 (1-9): " choice
+    echo "9. 修复快照同步问题"
+    echo "10. 退出"
+    read -p "请输入选项 (1-10): " choice
 
     case $choice in
       1)
@@ -958,11 +1035,14 @@ main_menu() {
         vote_governance_proposal
         ;;
       9)
+        fix_snapshot_sync_issue
+        ;;
+      10)
         print_info "退出脚本..."
         exit 0
         ;;
       *)
-        print_info "无效输入选项，请重新输入 1-9..."
+        print_info "无效输入选项，请重新输入 1-10..."
         echo "按任意键返回主菜单..."
         read -n 1
         ;;
@@ -972,5 +1052,3 @@ main_menu() {
 
 # 执行主菜单
 main_menu
-
-
