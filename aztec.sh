@@ -223,51 +223,100 @@ check_node_status() {
     
     # 检查 RPC 配置
     if grep -q "ETHEREUM_HOSTS" "$AZTEC_DIR/.env"; then
-      ETH_RPC=$(grep "ETHEREUM_HOSTS" "$AZTEC_DIR/.env" | cut -d= -f2 | tr -d '"' | tr -d ' ' | head -1)
+      ETH_RPC=$(grep "ETHEREUM_HOSTS" "$AZTEC_DIR/.env" | cut -d= -f2 | tr -d '"' | head -1)
       echo "✅ 执行层 RPC: 已配置"
-      echo "   📍 $ETH_RPC"
       
-      # 测试执行层 RPC 连接
-      print_info "测试执行层 RPC 连接..."
-      ETH_RPC_STATUS=$(curl -s -X POST -H "Content-Type: application/json" --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' "$ETH_RPC" 2>/dev/null | grep -o '"result"' || echo "failed")
-      if [ "$ETH_RPC_STATUS" = '"result"' ]; then
-        echo "   ✅ 执行层 RPC: 连接正常"
+      # 处理多个执行层 RPC URL
+      IFS=',' read -ra ETH_RPC_ARRAY <<< "$ETH_RPC"
+      for i in "${!ETH_RPC_ARRAY[@]}"; do
+        RPC_URL=$(echo "${ETH_RPC_ARRAY[$i]}" | tr -d ' ')
+        echo "   📍 $((i+1)). $RPC_URL"
         
-        # 获取执行层最新区块
-        ETH_BLOCK_HEX=$(curl -s -X POST -H "Content-Type: application/json" --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' "$ETH_RPC" 2>/dev/null | grep -o '"result":"[^"]*"' | cut -d'"' -f4)
-        if [ -n "$ETH_BLOCK_HEX" ]; then
-          ETH_BLOCK_DEC=$((16#${ETH_BLOCK_HEX#0x}))
-          echo "   📦 最新区块: $ETH_BLOCK_DEC"
+        # 测试执行层 RPC 连接
+        print_info "测试执行层 RPC $((i+1)) 连接..."
+        ETH_RPC_STATUS=$(timeout 10 curl -s -X POST -H "Content-Type: application/json" --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' "$RPC_URL" 2>/dev/null | grep -o '"result"' || echo "failed")
+        if [ "$ETH_RPC_STATUS" = '"result"' ]; then
+          echo "   ✅ 执行层 RPC $((i+1)): 连接正常"
+          
+          # 获取执行层最新区块
+          ETH_BLOCK_HEX=$(timeout 10 curl -s -X POST -H "Content-Type: application/json" --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' "$RPC_URL" 2>/dev/null | grep -o '"result":"[^"]*"' | cut -d'"' -f4)
+          if [ -n "$ETH_BLOCK_HEX" ]; then
+            ETH_BLOCK_DEC=$((16#${ETH_BLOCK_HEX#0x}))
+            echo "   📦 最新区块: $ETH_BLOCK_DEC"
+          fi
+        else
+          echo "   ❌ 执行层 RPC $((i+1)): 连接失败"
         fi
-      else
-        echo "   ❌ 执行层 RPC: 连接失败"
-      fi
+        echo
+      done
     else
       echo "❌ 执行层 RPC: 未配置"
     fi
 
     if grep -q "L1_CONSENSUS_HOST_URLS" "$AZTEC_DIR/.env"; then
-      CONS_RPC=$(grep "L1_CONSENSUS_HOST_URLS" "$AZTEC_DIR/.env" | cut -d= -f2 | tr -d '"' | tr -d ' ' | head -1)
+      CONS_RPC=$(grep "L1_CONSENSUS_HOST_URLS" "$AZTEC_DIR/.env" | cut -d= -f2 | tr -d '"' | head -1)
       echo "✅ 共识层 RPC: 已配置"
-      echo "   📍 $CONS_RPC"
       
-      # 测试共识层 RPC 连接
-      print_info "测试共识层 RPC 连接..."
-      CONS_RPC_STATUS=$(curl -s -X GET "$CONS_RPC/eth/v1/node/health" 2>/dev/null | head -1 | grep -o "200" || echo "failed")
-      if [ "$CONS_RPC_STATUS" = "200" ]; then
-        echo "   ✅ 共识层 RPC: 连接正常"
+      # 处理多个共识层 RPC URL
+      IFS=',' read -ra CONS_RPC_ARRAY <<< "$CONS_RPC"
+      CONS_RPC_SUCCESS=false
+      
+      for i in "${!CONS_RPC_ARRAY[@]}"; do
+        RPC_URL=$(echo "${CONS_RPC_ARRAY[$i]}" | tr -d ' ')
+        echo "   📍 $((i+1)). $RPC_URL"
         
-        # 获取共识层同步状态
-        SYNC_STATUS=$(curl -s -X GET "$CONS_RPC/eth/v1/node/syncing" 2>/dev/null | grep -o '"is_syncing":[^,]*' | cut -d':' -f2 | tr -d ' ' || echo "unknown")
-        if [ "$SYNC_STATUS" = "false" ]; then
-          echo "   📊 同步状态: 已同步"
-        elif [ "$SYNC_STATUS" = "true" ]; then
-          echo "   📊 同步状态: 同步中"
-        else
-          echo "   📊 同步状态: 未知"
+        # 测试共识层 RPC 连接
+        print_info "测试共识层 RPC $((i+1)) 连接..."
+        
+        # 尝试不同的 Beacon API 端点
+        CONS_RPC_STATUS=$(timeout 10 curl -s -X GET "$RPC_URL/eth/v1/node/health" 2>/dev/null | head -1 | grep -o "200" || echo "failed")
+        
+        # 如果健康检查失败，尝试同步状态端点
+        if [ "$CONS_RPC_STATUS" != "200" ]; then
+          CONS_RPC_STATUS=$(timeout 10 curl -s -X GET "$RPC_URL/eth/v1/node/syncing" 2>/dev/null | head -1 | grep -o "200" || echo "failed")
         fi
+        
+        # 如果还是失败，尝试 genesis 端点
+        if [ "$CONS_RPC_STATUS" != "200" ]; then
+          CONS_RPC_STATUS=$(timeout 10 curl -s -X GET "$RPC_URL/eth/v1/beacon/genesis" 2>/dev/null | head -1 | grep -o "200" || echo "failed")
+        fi
+        
+        if [ "$CONS_RPC_STATUS" = "200" ]; then
+          echo "   ✅ 共识层 RPC $((i+1)): 连接正常"
+          CONS_RPC_SUCCESS=true
+          
+          # 获取共识层同步状态
+          SYNC_RESPONSE=$(timeout 10 curl -s -X GET "$RPC_URL/eth/v1/node/syncing" 2>/dev/null)
+          if [ -n "$SYNC_RESPONSE" ]; then
+            SYNC_STATUS=$(echo "$SYNC_RESPONSE" | grep -o '"is_syncing":[^,]*' | cut -d':' -f2 | tr -d ' ' || echo "unknown")
+            if [ "$SYNC_STATUS" = "false" ]; then
+              echo "   📊 同步状态: 已同步"
+            elif [ "$SYNC_STATUS" = "true" ]; then
+              echo "   📊 同步状态: 同步中"
+            else
+              echo "   📊 同步状态: 未知"
+            fi
+          fi
+          
+          # 获取链ID信息
+          GENESIS_RESPONSE=$(timeout 10 curl -s -X GET "$RPC_URL/eth/v1/beacon/genesis" 2>/dev/null)
+          if [ -n "$GENESIS_RESPONSE" ]; then
+            CHAIN_ID=$(echo "$GENESIS_RESPONSE" | grep -o '"chain_id":"[^"]*"' | cut -d'"' -f4)
+            if [ -n "$CHAIN_ID" ]; then
+              echo "   🔗 链ID: $CHAIN_ID"
+            fi
+          fi
+        else
+          echo "   ❌ 共识层 RPC $((i+1)): 连接失败"
+        fi
+        echo
+      done
+      
+      # 总结共识层 RPC 状态
+      if [ "$CONS_RPC_SUCCESS" = true ]; then
+        echo "   ✅ 共识层 RPC: 至少有一个连接正常"
       else
-        echo "   ❌ 共识层 RPC: 连接失败"
+        echo "   ❌ 共识层 RPC: 所有连接都失败"
       fi
     else
       echo "❌ 共识层 RPC: 未配置"
@@ -332,12 +381,16 @@ check_node_status() {
   if docker ps -q -f name=aztec-sequencer | grep -q .; then
     echo "1. 查看详细日志 (选项 2)"
     echo "2. 检查区块高度 (选项 3)"
-    echo "3. 如遇 RPC 连接问题，请检查网络或更换 RPC 服务商"
+    if [ "$CONS_RPC_SUCCESS" = false ]; then
+      echo "3. ⚠️  共识层 RPC 连接失败，请检查网络或更换 RPC 服务商"
+    fi
     echo "4. 如遇问题可重启节点"
   else
     echo "1. 安装并启动节点 (选项 1)"
     echo "2. 检查配置文件"
-    echo "3. 确认 RPC 服务可用性"
+    if [ "$CONS_RPC_SUCCESS" = false ]; then
+      echo "3. ⚠️  确认共识层 RPC 服务可用性"
+    fi
   fi
 
   echo
@@ -666,6 +719,108 @@ fix_snapshot_sync() {
   print_info "修复完成！"
 }
 
+# 备份节点配置
+backup_node_config() {
+  print_info "备份节点配置..."
+  
+  local backup_dir="/root/aztec_backup_$(date +%Y%m%d_%H%M%S)"
+  mkdir -p "$backup_dir"
+  
+  if [ -f "$AZTEC_DIR/.env" ]; then
+    cp "$AZTEC_DIR/.env" "$backup_dir/"
+    print_info "配置文件已备份到: $backup_dir/.env"
+  fi
+  
+  if [ -f "$AZTEC_DIR/docker-compose.yml" ]; then
+    cp "$AZTEC_DIR/docker-compose.yml" "$backup_dir/"
+    print_info "Docker配置已备份到: $backup_dir/docker-compose.yml"
+  fi
+  
+  print_info "备份完成！备份目录: $backup_dir"
+}
+
+# 恢复节点配置
+restore_node_config() {
+  print_info "恢复节点配置..."
+  
+  local backup_dir="/root/aztec_backup_$(date +%Y%m%d_%H%M%S)"
+  
+  # 查找最新的备份目录
+  local latest_backup=$(ls -dt /root/aztec_backup_* 2>/dev/null | head -1)
+  
+  if [ -z "$latest_backup" ]; then
+    print_info "未找到备份文件。"
+    return
+  fi
+  
+  print_info "找到备份: $latest_backup"
+  read -p "确认恢复？(y/n): " confirm
+  if [[ "$confirm" != "y" ]]; then
+    return
+  fi
+  
+  if [ -f "$latest_backup/.env" ]; then
+    cp "$latest_backup/.env" "$AZTEC_DIR/"
+    print_info "配置文件已恢复。"
+  fi
+  
+  if [ -f "$latest_backup/docker-compose.yml" ]; then
+    cp "$latest_backup/docker-compose.yml" "$AZTEC_DIR/"
+    print_info "Docker配置已恢复。"
+  fi
+  
+  print_info "配置恢复完成！"
+  
+  read -p "是否重启节点？(y/n): " restart_confirm
+  if [[ "$restart_confirm" == "y" ]]; then
+    cd "$AZTEC_DIR"
+    docker compose restart
+    print_info "节点已重启。"
+  fi
+}
+
+# 检查系统要求
+check_system_requirements() {
+  print_info "=== 系统要求检查 ==="
+  
+  # 检查内存
+  local total_mem=$(free -g | awk 'NR==2{print $2}')
+  if [ "$total_mem" -lt 8 ]; then
+    echo "⚠️  内存: ${total_mem}GB (推荐 16GB)"
+  else
+    echo "✅ 内存: ${total_mem}GB"
+  fi
+  
+  # 检查磁盘空间
+  local disk_space=$(df -h / | awk 'NR==2{print $4}')
+  local disk_avail=$(df -BG / | awk 'NR==2{print $4}' | sed 's/G//')
+  if [ "$disk_avail" -lt 100 ]; then
+    echo "⚠️  磁盘空间: ${disk_space} (推荐 200GB+)"
+  else
+    echo "✅ 磁盘空间: ${disk_space}"
+  fi
+  
+  # 检查 CPU 核心数
+  local cpu_cores=$(nproc)
+  if [ "$cpu_cores" -lt 4 ]; then
+    echo "⚠️  CPU核心: ${cpu_cores} (推荐 8核)"
+  else
+    echo "✅ CPU核心: ${cpu_cores}"
+  fi
+  
+  # 检查操作系统
+  if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    echo "✅ 操作系统: $NAME $VERSION"
+  else
+    echo "⚠️  操作系统: 未知"
+  fi
+  
+  echo
+  echo "按任意键继续..."
+  read -n 1
+}
+
 # 主菜单函数
 main_menu() {
   while true; do
@@ -680,8 +835,11 @@ main_menu() {
     echo "6. 删除节点数据"
     echo "7. 设置治理提案投票"
     echo "8. 修复快照同步问题"
-    echo "9. 退出"
-    read -p "请输入选项 (1-9): " choice
+    echo "9. 备份节点配置"
+    echo "10. 恢复节点配置"
+    echo "11. 检查系统要求"
+    echo "12. 退出"
+    read -p "请输入选项 (1-12): " choice
 
     case $choice in
       1)
@@ -721,6 +879,19 @@ main_menu() {
         read -n 1
         ;;
       9)
+        backup_node_config
+        echo "按任意键继续..."
+        read -n 1
+        ;;
+      10)
+        restore_node_config
+        echo "按任意键继续..."
+        read -n 1
+        ;;
+      11)
+        check_system_requirements
+        ;;
+      12)
         print_info "退出脚本。"
         exit 0
         ;;
