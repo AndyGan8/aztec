@@ -219,8 +219,8 @@ fix_rpc_ports() {
 
   # 4. 检查端口状态
   print_info "检查端口监听状态..."
-  RPC_CHECK=$(ss -tuln 2>/dev/null | grep ':8080' | wc -l)
-  P2P_CHECK=$(ss -tuln 2>/dev/null | grep ':40400' | wc -l)
+  RPC_CHECK=$(docker port aztec-sequencer 8080 2>/dev/null | wc -l)
+  P2P_CHECK=$(docker port aztec-sequencer 40400 2>/dev/null | wc -l)
 
   if [ "$RPC_CHECK" -gt 0 ]; then
     print_info "✅ RPC 端口 (8080) 现在正在监听"
@@ -298,6 +298,120 @@ fix_snapshot_sync() {
   echo "按任意键查看日志..."
   read -n 1
   docker logs -f aztec-sequencer --tail 50
+}
+
+# 修复配置参数警告
+fix_config_warnings() {
+  print_info "=== 修复配置参数警告 ==="
+  
+  if [ ! -f "$AZTEC_DIR/docker-compose.yml" ]; then
+    print_info "错误：未找到 $AZTEC_DIR/docker-compose.yml 文件，请先安装并启动节点。"
+    return 1
+  fi
+
+  print_info "检测到配置参数类型警告，正在修复..."
+  
+  # 停止节点
+  cd "$AZTEC_DIR"
+  docker compose down
+  
+  # 检查并修复 docker-compose.yml 中的参数
+  if grep -q "sync_per_item_duration" "$AZTEC_DIR/docker-compose.yml"; then
+    print_info "修复 sync_per_item_duration 参数类型..."
+    # 将浮点数改为整数
+    sed -i 's/sync_per_item_duration=[0-9]*\.[0-9]*/sync_per_item_duration=1000/' "$AZTEC_DIR/docker-compose.yml"
+  fi
+  
+  # 重启节点
+  docker compose up -d
+  
+  print_info "配置参数已修复，节点正在重启..."
+  print_info "等待节点启动..."
+  sleep 30
+  
+  # 检查修复结果
+  print_info "检查修复后的日志..."
+  docker logs aztec-sequencer --tail 10 | grep -i "warn\|error" || echo "✅ 未发现配置警告"
+  
+  print_info "修复完成！"
+}
+
+# 检查节点同步状态
+check_sync_status() {
+  print_info "=== 检查节点同步状态 ==="
+  
+  if [ ! -f "$AZTEC_DIR/docker-compose.yml" ]; then
+    print_info "错误：未找到 $AZTEC_DIR/docker-compose.yml 文件，请先安装并启动节点。"
+    return 1
+  fi
+
+  # 检查容器是否运行
+  if ! docker ps -q -f name=aztec-sequencer | grep -q .; then
+    print_info "错误：Aztec 节点未运行。"
+    return 1
+  fi
+
+  print_info "检查节点同步状态..."
+  
+  # 获取最新日志
+  RECENT_LOGS=$(docker logs --tail 50 aztec-sequencer 2>/dev/null)
+  
+  # 分析同步状态
+  SYNC_BLOCKS=$(echo "$RECENT_LOGS" | grep -o "synced [0-9]* blocks" | tail -1)
+  L1_SYNC=$(echo "$RECENT_LOGS" | grep -o "L1 block [0-9]*" | tail -1)
+  L2_SLOT=$(echo "$RECENT_LOGS" | grep -o "L2 slot [0-9]*" | tail -1)
+  PENDING_SYNC=$(echo "$RECENT_LOGS" | grep "pending sync from L1" | wc -l)
+  
+  echo
+  echo "=== 同步状态分析 ==="
+  
+  if [ -n "$SYNC_BLOCKS" ]; then
+    echo "✅ $SYNC_BLOCKS"
+  fi
+  
+  if [ -n "$L1_SYNC" ]; then
+    echo "📦 $L1_SYNC"
+  fi
+  
+  if [ -n "$L2_SLOT" ]; then
+    echo "⚡ $L2_SLOT"
+  fi
+  
+  if [ "$PENDING_SYNC" -gt 0 ]; then
+    echo "🔄 正在从 L1 同步数据 ($PENDING_SYNC 条相关日志)"
+    echo "💡 提示: 这是正常现象，节点需要先完成 L1 数据同步才能开始出块"
+  fi
+  
+  # 检查配置警告
+  CONFIG_WARNINGS=$(echo "$RECENT_LOGS" | grep "INT value type cannot accept a floating-point value" | wc -l)
+  if [ "$CONFIG_WARNINGS" -gt 0 ]; then
+    echo "⚠️  发现 $CONFIG_WARNINGS 条配置警告"
+    echo "💡 建议: 运行修复配置参数功能"
+  fi
+  
+  # 检查错误
+  ERRORS=$(echo "$RECENT_LOGS" | grep -i "error\|failed\|exception" | grep -v "pending sync" | wc -l)
+  if [ "$ERRORS" -gt 0 ]; then
+    echo "❌ 发现 $ERRORS 个错误:"
+    echo "$RECENT_LOGS" | grep -i "error\|failed\|exception" | grep -v "pending sync" | head -5
+  else
+    echo "✅ 未发现严重错误"
+  fi
+  
+  echo
+  echo "=== 建议操作 ==="
+  if [ "$PENDING_SYNC" -gt 0 ]; then
+    echo "1. 继续等待同步完成（可能需要几小时到一天）"
+    echo "2. 确保 L1 RPC 连接稳定"
+    echo "3. 检查网络带宽和系统资源"
+  fi
+  
+  if [ "$CONFIG_WARNINGS" -gt 0 ]; then
+    echo "4. 运行 '修复配置参数警告' 功能"
+  fi
+  
+  echo
+  echo "查看实时日志: docker logs -f aztec-sequencer"
 }
 
 # 主逻辑：安装和启动 Aztec 节点
@@ -783,7 +897,7 @@ delete_docker_and_node() {
   read -n 1
 }
 
-# 修改节点状态检查函数，支持分布式节点
+# 修改节点状态检查函数，修复显示问题
 check_node_status() {
   # 颜色定义
   GREEN='\033[1;32m'
@@ -802,56 +916,71 @@ check_node_status() {
     if [ "$CONTAINER_STATUS" = "running" ]; then
       echo -e "  ${GREEN} Aztec 容器: 运行中${NC}"
 
-      # 检查端口监听 - 修复命令执行问题
-      RPC_PORT_LISTENING=0
-      P2P_PORT_LISTENING=0
+      # 检查端口监听 - 使用更简单的方法
+      echo -e "  ${BLUE} 端口检查:${NC}"
       
-      # 使用更稳定的方式检查端口
-      if command -v ss >/dev/null 2>&1; then
-        RPC_PORT_LISTENING=$(ss -tuln 2>/dev/null | grep ':8080' | wc -l)
-        P2P_PORT_LISTENING=$(ss -tuln 2>/dev/null | grep ':40400' | wc -l)
-      elif command -v netstat >/dev/null 2>&1; then
-        RPC_PORT_LISTENING=$(netstat -tuln 2>/dev/null | grep ':8080' | wc -l)
-        P2P_PORT_LISTENING=$(netstat -tuln 2>/dev/null | grep ':40400' | wc -l)
-      else
-        echo -e "  ${YELLOW} 警告: 无法检查端口状态 (缺少 ss 或 netstat 命令)${NC}"
-      fi
+      # 方法1: 使用 docker port 检查
+      RPC_PORT_CHECK=$(docker port aztec-sequencer 8080 2>/dev/null | wc -l)
+      P2P_PORT_CHECK=$(docker port aztec-sequencer 40400 2>/dev/null | wc -l)
       
-      if [ "$RPC_PORT_LISTENING" -gt 0 ]; then
-        echo -e "  ${GREEN} RPC 端口 (8080): 监听中${NC}"
+      if [ "$RPC_PORT_CHECK" -gt 0 ]; then
+        echo -e "    ${GREEN}✓ RPC 端口 (8080): 已映射${NC}"
       else
-        echo -e "  ${YELLOW} RPC 端口 (8080): 未监听${NC}"
-        # 自动修复建议
-        AUTO_FIX_RPC=1
+        echo -e "    ${YELLOW}⚠ RPC 端口 (8080): 未映射${NC}"
       fi
 
-      if [ "$P2P_PORT_LISTENING" -gt 0 ]; then
-        echo -e "  ${GREEN} P2P 端口 (40400): 监听中${NC}"
+      if [ "$P2P_PORT_CHECK" -gt 0 ]; then
+        echo -e "    ${GREEN}✓ P2P 端口 (40400): 已映射${NC}"
       else
-        echo -e "  ${YELLOW} P2P 端口 (40400): 未监听${NC}"
+        echo -e "    ${YELLOW}⚠ P2P 端口 (40400): 未映射${NC}"
       fi
 
-      # 检查日志中的错误
-      RECENT_LOGS=$(docker logs --tail 20 aztec-sequencer 2>/dev/null | head -10)
-      if echo "$RECENT_LOGS" | grep -q -i "error\|failed\|exception"; then
-        echo -e "  ${YELLOW} 最近日志: 发现错误${NC}"
-        # 显示具体错误
-        echo "$RECENT_LOGS" | grep -i "error\|failed\|exception" | head -3 | while read line; do
-          echo -e "    ${RED}   - $line${NC}"
+      # 方法2: 检查进程是否在监听端口
+      echo -e "  ${BLUE} 进程检查:${NC}"
+      if docker exec aztec-sequencer sh -c "netstat -tuln 2>/dev/null | grep ':8080'" >/dev/null 2>&1; then
+        echo -e "    ${GREEN}✓ 进程正在监听 8080 端口${NC}"
+      else
+        echo -e "    ${YELLOW}⚠ 进程未监听 8080 端口${NC}"
+      fi
+
+      if docker exec aztec-sequencer sh -c "netstat -tuln 2>/dev/null | grep ':40400'" >/dev/null 2>&1; then
+        echo -e "    ${GREEN}✓ 进程正在监听 40400 端口${NC}"
+      else
+        echo -e "    ${YELLOW}⚠ 进程未监听 40400 端口${NC}"
+      fi
+
+      # 检查日志中的错误和状态
+      echo -e "  ${BLUE} 日志状态:${NC}"
+      RECENT_LOGS=$(docker logs --tail 15 aztec-sequencer 2>/dev/null)
+      
+      # 检查同步状态
+      if echo "$RECENT_LOGS" | grep -q "pending sync from L1"; then
+        echo -e "    ${YELLOW}🔄 状态: 从 L1 同步中${NC}"
+        SYNC_COUNT=$(echo "$RECENT_LOGS" | grep "pending sync from L1" | wc -l)
+        echo -e "    ${BLUE}   最近日志中发现 $SYNC_COUNT 条同步记录${NC}"
+      elif echo "$RECENT_LOGS" | grep -q "synced"; then
+        echo -e "    ${GREEN}✅ 状态: 同步中${NC}"
+      else
+        echo -e "    ${BLUE}📊 状态: 请查看详细日志${NC}"
+      fi
+
+      # 检查错误
+      ERROR_LOGS=$(echo "$RECENT_LOGS" | grep -i "error\|failed\|exception" | head -3)
+      if [ -n "$ERROR_LOGS" ]; then
+        echo -e "    ${YELLOW}⚠ 最近错误:${NC}"
+        echo "$ERROR_LOGS" | while read line; do
+          echo -e "      ${RED}  - $(echo "$line" | cut -c1-80)${NC}"
         done
       else
-        echo -e "  ${GREEN} 最近日志: 正常${NC}"
+        echo -e "    ${GREEN}✅ 最近无错误日志${NC}"
       fi
 
-      # 如果端口未监听，提供自动修复选项
-      if [ "${AUTO_FIX_RPC:-0}" -eq 1 ]; then
-        echo
-        echo -e "  ${YELLOW}⚠️  检测到 RPC 端口未监听，可能节点还在同步或需要修复${NC}"
-        read -p "  是否尝试自动修复？(y/n): " fix_rpc
-        if [[ "$fix_rpc" == "y" ]]; then
-          fix_rpc_ports
-        fi
+      # 检查配置警告
+      CONFIG_WARNINGS=$(echo "$RECENT_LOGS" | grep "INT value type cannot accept a floating-point value" | wc -l)
+      if [ "$CONFIG_WARNINGS" -gt 0 ]; then
+        echo -e "    ${YELLOW}⚠ 配置警告: $CONFIG_WARNINGS 条参数类型警告${NC}"
       fi
+
     else
       echo -e "  ${RED} Aztec 容器: $CONTAINER_STATUS${NC}"
     fi
@@ -871,63 +1000,36 @@ check_node_status() {
     GOVERNANCE_ADDRESS=$(grep "GOVERNANCE_PROPOSER_PAYLOAD_ADDRESS" "$AZTEC_DIR/.env" | cut -d'"' -f2 2>/dev/null || echo "")
 
     if [ -n "$ETH_RPC" ]; then
-      echo -e "  ${BLUE} 执行层 RPC: ${ETH_RPC:0:50}...${NC}"  # 只显示前50个字符
+      echo -e "  ${BLUE} 执行层 RPC: ${ETH_RPC:0:30}...${NC}"
       # 测试执行层连接
-      if curl -s -m 10 -X POST -H "Content-Type: application/json" \
+      if timeout 10 curl -s -X POST -H "Content-Type: application/json" \
          --data '{"jsonrpc":"2.0","method":"net_version","params":[],"id":1}' \
          "$ETH_RPC" > /dev/null 2>&1; then
-        echo -e "  ${GREEN} 执行层连接: 正常${NC}"
-
-        # 获取执行层区块高度
-        ETH_BLOCK_RESPONSE=$(curl -s -m 10 -X POST -H "Content-Type: application/json" \
-          --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
-          "$ETH_RPC" 2>/dev/null || echo "")
-        if [ -n "$ETH_BLOCK_RESPONSE" ]; then
-          ETH_BLOCK=$(echo "$ETH_BLOCK_RESPONSE" | grep -o '"result":"[^"]*"' | cut -d'"' -f4)
-          if [ -n "$ETH_BLOCK" ]; then
-            BLOCK_DEC=$(printf "%d" "$ETH_BLOCK" 2>/dev/null || echo "N/A")
-            echo -e "  ${GREEN} 执行层区块: $BLOCK_DEC${NC}"
-          fi
-        fi
+        echo -e "    ${GREEN}✅ 执行层连接: 正常${NC}"
       else
-        echo -e "  ${RED} 执行层连接: 失败${NC}"
+        echo -e "    ${RED}❌ 执行层连接: 失败${NC}"
       fi
     else
       echo -e "  ${YELLOW} 执行层 RPC: 未配置${NC}"
     fi
 
     if [ -n "$CONS_RPC" ]; then
-      # 检查是否有多个RPC（包含逗号）
+      # 检查是否有多个RPC
       if [[ "$CONS_RPC" == *","* ]]; then
-        echo -e "  ${GREEN} 共识层 RPC: 多RPC配置（故障转移已启用）${NC}"
+        echo -e "  ${GREEN} 共识层 RPC: 多RPC配置${NC}"
         MAIN_RPC=$(echo "$CONS_RPC" | cut -d',' -f1)
-        BACKUP_RPC=$(echo "$CONS_RPC" | cut -d',' -f2)
-        echo -e "  ${BLUE}   主RPC: ${MAIN_RPC:0:50}...${NC}"
-        if [ -n "$BACKUP_RPC" ]; then
-          echo -e "  ${BLUE}   备用RPC: ${BACKUP_RPC:0:50}...${NC}"
-        fi
+        echo -e "    ${BLUE} 主RPC: ${MAIN_RPC:0:30}...${NC}"
       else
-        echo -e "  ${YELLOW} 共识层 RPC: 单一RPC（建议添加备用）${NC}"
-        echo -e "  ${BLUE}   ${CONS_RPC:0:50}...${NC}"
+        echo -e "  ${YELLOW} 共识层 RPC: 单一RPC${NC}"
+        echo -e "    ${BLUE} ${CONS_RPC:0:30}...${NC}"
       fi
       
       # 测试共识层连接
       MAIN_CONS_RPC=$(echo "$CONS_RPC" | cut -d',' -f1)
-      if curl -s -m 10 "$MAIN_CONS_RPC/eth/v1/node/health" > /dev/null 2>&1; then
-        echo -e "  ${GREEN} 共识层连接: 正常${NC}"
-
-        # 获取共识层同步状态
-        SYNC_STATUS=$(curl -s -m 10 "$MAIN_CONS_RPC/eth/v1/node/syncing" 2>/dev/null || echo "{}")
-        if echo "$SYNC_STATUS" | grep -q '"is_syncing":false'; then
-          echo -e "  ${GREEN} 共识层同步: 完全同步${NC}"
-        elif echo "$SYNC_STATUS" | grep -q '"is_syncing":true'; then
-          SYNC_DISTANCE=$(echo "$SYNC_STATUS" | grep -o '"sync_distance":"[^"]*"' | cut -d'"' -f4)
-          echo -e "  ${YELLOW} 共识层同步: 同步中 (距离: ${SYNC_DISTANCE:-未知})${NC}"
-        else
-          echo -e "  ${YELLOW} 共识层同步: 未知${NC}"
-        fi
+      if timeout 10 curl -s "$MAIN_CONS_RPC/eth/v1/node/health" > /dev/null 2>&1; then
+        echo -e "    ${GREEN}✅ 共识层连接: 正常${NC}"
       else
-        echo -e "  ${RED} 共识层连接: 失败${NC}"
+        echo -e "    ${RED}❌ 共识层连接: 失败${NC}"
       fi
     else
       echo -e "  ${YELLOW} 共识层 RPC: 未配置${NC}"
@@ -945,147 +1047,39 @@ check_node_status() {
 
   echo
 
-  # 检查本地 Ethereum 节点（如果存在）
-  echo -e "${BLUE} 本地 Ethereum 节点状态:${NC}"
-
-  # 检查本地 Geth
-  if systemctl is-active --quiet geth 2>/dev/null; then
-    echo -e "  ${GREEN} 本地 Geth: 运行中${NC}"
-
-    # 检查 Geth 端口
-    if ss -tuln 2>/dev/null | grep -q ':8545'; then
-      echo -e "  ${GREEN} 本地 Geth RPC (8545): 监听中${NC}"
-    else
-      echo -e "  ${YELLOW} 本地 Geth RPC (8545): 未监听${NC}"
-    fi
-  else
-    echo -e "  ${BLUE}  本地 Geth: 未运行 (可能使用远程节点)${NC}"
-  fi
-
-  # 检查本地 Lighthouse
-  if systemctl is-active --quiet lighthouse 2>/dev/null; then
-    echo -e "  ${GREEN} 本地 Lighthouse: 运行中${NC}"
-
-    # 检查 Lighthouse 端口
-    if ss -tuln 2>/dev/null | grep -q ':5052'; then
-      echo -e "  ${GREEN} 本地 Lighthouse API (5052): 监听中${NC}"
-    else
-      echo -e "  ${YELLOW} 本地 Lighthouse API (5052): 未监听${NC}"
-    fi
-  else
-    echo -e "  ${BLUE}  本地 Lighthouse: 未运行 (可能使用远程节点)${NC}"
-  fi
-
-  echo
-
   # 系统资源检查
   echo -e "${BLUE} 系统资源状态:${NC}"
 
   # 内存使用
-  if command -v free >/dev/null 2>&1; then
-    MEM_TOTAL=$(free -m 2>/dev/null | awk 'NR==2{print $2}')
-    MEM_USED=$(free -m 2>/dev/null | awk 'NR==2{print $3}')
-    if [ -n "$MEM_TOTAL" ] && [ "$MEM_TOTAL" -gt 0 ]; then
-      MEM_PERCENT=$((MEM_USED * 100 / MEM_TOTAL))
-      if [ "$MEM_PERCENT" -lt 80 ]; then
-        echo -e "  ${GREEN} 内存使用: ${MEM_PERCENT}%${NC}"
-      else
-        echo -e "  ${YELLOW} 内存使用: ${MEM_PERCENT}% (较高)${NC}"
-      fi
-    else
-      echo -e "  ${YELLOW} 内存使用: 无法获取${NC}"
-    fi
-  else
-    echo -e "  ${YELLOW} 内存使用: 无法检查${NC}"
-  fi
+  MEM_INFO=$(free -m 2>/dev/null | awk 'NR==2{print $3" MB / "$2" MB ("int($3*100/$2)"%)"}' || echo "无法获取")
+  echo -e "  ${BLUE} 内存使用: $MEM_INFO${NC}"
 
   # 磁盘使用
-  if command -v df >/dev/null 2>&1; then
-    DISK_USED=$(df / 2>/dev/null | awk 'NR==2{print $5}' | sed 's/%//')
-    if [ -n "$DISK_USED" ]; then
-      if [ "$DISK_USED" -lt 80 ]; then
-        echo -e "  ${GREEN} 磁盘使用: ${DISK_USED}%${NC}"
-      else
-        echo -e "  ${YELLOW} 磁盘使用: ${DISK_USED}% (较高)${NC}"
-      fi
-    else
-      echo -e "  ${YELLOW} 磁盘使用: 无法获取${NC}"
-    fi
-  else
-    echo -e "  ${YELLOW} 磁盘使用: 无法检查${NC}"
-  fi
+  DISK_INFO=$(df -h / 2>/dev/null | awk 'NR==2{print $3" / "$2" ("$5")"}' || echo "无法获取")
+  echo -e "  ${BLUE} 磁盘使用: $DISK_INFO${NC}"
 
   # CPU 负载
-  if [ -f /proc/loadavg ]; then
-    LOAD_AVG=$(cat /proc/loadavg 2>/dev/null | awk '{print $1}')
-    CPU_CORES=$(nproc 2>/dev/null || echo "1")
-    if [ -n "$LOAD_AVG" ] && [ -n "$CPU_CORES" ]; then
-      if (( $(echo "$LOAD_AVG < $CPU_CORES" | bc -l 2>/dev/null) )); then
-        echo -e "  ${GREEN} CPU 负载: $LOAD_AVG${NC}"
-      else
-        echo -e "  ${YELLOW} CPU 负载: $LOAD_AVG (较高)${NC}"
-      fi
-    else
-      echo -e "  ${YELLOW} CPU 负载: 无法获取${NC}"
-    fi
-  else
-    echo -e "  ${YELLOW} CPU 负载: 无法检查${NC}"
-  fi
+  LOAD_AVG=$(cat /proc/loadavg 2>/dev/null | awk '{print $1}' || echo "无法获取")
+  echo -e "  ${BLUE} CPU 负载: $LOAD_AVG${NC}"
 
   echo
   echo -e "${BLUE}===  状态总结 ===${NC}"
 
-  # 总体状态判断
-  AZTEC_RUNNING=$(docker ps -q -f name=aztec-sequencer | wc -l)
-  ETH_CONNECTION=0
-  CONS_CONNECTION=0
-
-  # 检查 Ethereum 连接状态
-  if [ -n "$ETH_RPC" ] && curl -s -m 10 -X POST -H "Content-Type: application/json" \
-     --data '{"jsonrpc":"2.0","method":"net_version","params":[],"id":1}' \
-     "$ETH_RPC" > /dev/null 2>&1; then
-    ETH_CONNECTION=1
-  fi
-
-  if [ -n "$CONS_RPC" ] && curl -s -m 10 "$(echo "$CONS_RPC" | cut -d',' -f1)/eth/v1/node/health" > /dev/null 2>&1; then
-    CONS_CONNECTION=1
-  fi
-
-  TOTAL_STATUS=$((AZTEC_RUNNING + ETH_CONNECTION + CONS_CONNECTION))
-
-  if [ $TOTAL_STATUS -eq 3 ]; then
-    echo -e "${GREEN} 所有服务正常运行！${NC}"
-    echo -e "${GREEN}   • Aztec 节点: 运行中${NC}"
-    echo -e "${GREEN}   • Ethereum 执行层: 连接正常${NC}"
-    echo -e "${GREEN}   • Ethereum 共识层: 连接正常${NC}"
-    if [ -n "$GOVERNANCE_ADDRESS" ]; then
-      echo -e "${GREEN}   • 治理提案投票: 已配置${NC}"
-    else
-      echo -e "${YELLOW}   • 治理提案投票: 未配置${NC}"
-    fi
-    if [[ "$CONS_RPC" == *","* ]]; then
-      echo -e "${GREEN}   • RPC故障转移: 已启用${NC}"
-    else
-      echo -e "${YELLOW}   • RPC故障转移: 未配置${NC}"
-    fi
-  elif [ $TOTAL_STATUS -ge 1 ]; then
-    echo -e "${YELLOW} 部分服务运行中 ($TOTAL_STATUS/3)${NC}"
-    [ $AZTEC_RUNNING -eq 1 ] && echo -e "${GREEN}   • Aztec 节点: 运行中${NC}" || echo -e "${RED}   • Aztec 节点: 未运行${NC}"
-    [ $ETH_CONNECTION -eq 1 ] && echo -e "${GREEN}   • Ethereum 执行层: 连接正常${NC}" || echo -e "${RED}   • Ethereum 执行层: 连接失败${NC}"
-    [ $CONS_CONNECTION -eq 1 ] && echo -e "${GREEN}   • Ethereum 共识层: 连接正常${NC}" || echo -e "${RED}   • Ethereum 共识层: 连接失败${NC}"
-    if [ -n "$GOVERNANCE_ADDRESS" ]; then
-      echo -e "${GREEN}   • 治理提案投票: 已配置${NC}"
-    else
-      echo -e "${YELLOW}   • 治理提案投票: 未配置${NC}"
-    fi
-    if [[ "$CONS_RPC" == *","* ]]; then
-      echo -e "${GREEN}   • RPC故障转移: 已启用${NC}"
-    else
-      echo -e "${YELLOW}   • RPC故障转移: 未配置${NC}"
-    fi
+  # 简单状态判断
+  if docker ps -q -f name=aztec-sequencer | grep -q .; then
+    echo -e "${GREEN}✅ Aztec 节点正在运行${NC}"
+    echo -e "${BLUE}💡 提示: 节点显示 'pending sync from L1' 是正常现象，表示正在同步数据${NC}"
+    echo -e "${BLUE}⏰ 预计同步时间: 几小时到一天${NC}"
   else
-    echo -e "${RED} 所有服务均未运行${NC}"
+    echo -e "${RED}❌ Aztec 节点未运行${NC}"
   fi
+
+  echo
+  echo "=== 建议操作 ==="
+  echo "1. 查看详细日志: 选择菜单选项 2"
+  echo "2. 检查同步状态: 等待同步完成"
+  echo "3. 确保 RPC 连接稳定"
+  echo "4. 如遇问题可尝试重启节点"
 
   echo
   echo "按任意键返回主菜单..."
@@ -1181,7 +1175,7 @@ main_menu() {
     echo "请选择要执行的操作:"
     echo "1. 安装并启动 Aztec 节点"
     echo "2. 查看节点日志"
-    echo "3. 获取区块高度和同步证明（请等待半个小时后再查询）"
+    echo "3. 获取区块高度和同步证明"
     echo "4. 停止节点、删除 Docker 容器、更新节点并重新创建 Docker"
     echo "5. 注册验证者"
     echo "6. 删除 Docker 容器和节点数据"
@@ -1189,8 +1183,10 @@ main_menu() {
     echo "8. 设置治理提案投票"
     echo "9. 修复快照同步问题"
     echo "10. 修复 RPC 端口和配置问题"
-    echo "11. 退出"
-    read -p "请输入选项 (1-11): " choice
+    echo "11. 检查节点同步状态"
+    echo "12. 修复配置参数警告"
+    echo "13. 退出"
+    read -p "请输入选项 (1-13): " choice
 
     case $choice in
       1)
@@ -1244,11 +1240,21 @@ main_menu() {
         read -n 1
         ;;
       11)
+        check_sync_status
+        echo "按任意键返回主菜单..."
+        read -n 1
+        ;;
+      12)
+        fix_config_warnings
+        echo "按任意键返回主菜单..."
+        read -n 1
+        ;;
+      13)
         print_info "退出脚本..."
         exit 0
         ;;
       *)
-        print_info "无效输入选项，请重新输入 1-11..."
+        print_info "无效输入选项，请重新输入 1-13..."
         echo "按任意键返回主菜单..."
         read -n 1
         ;;
