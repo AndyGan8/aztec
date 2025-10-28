@@ -177,7 +177,7 @@ validate_private_keys() {
   done
 }
 
-# ==================== 修复版：执行治理提案投票（使用 docker exec） ====================
+# ==================== 终极修复版：执行治理提案投票 ====================
 vote_governance_proposal() {
   print_info "=== 执行治理提案投票（2.0.4） ==="
 
@@ -195,16 +195,18 @@ vote_governance_proposal() {
 
   print_info "正在通过容器内部执行投票..."
 
-  # 使用 docker exec 在容器内直接 curl 127.0.0.1:8880
-  RESPONSE=$(docker exec aztec-sequencer curl -s --connect-timeout 10 \
-    -X POST http://127.0.0.1:8880 \
-    -H 'Content-Type: application/json' \
-    -d '{
-      "jsonrpc":"2.0",
-      "method":"nodeAdmin_setConfig",
-      "params":[{"governanceProposerPayload":"'"$GOVERNANCE_PAYLOAD"'"}],
-      "id":1
-    }')
+  # 关键修复：使用 sh -c + || echo 防止中断
+  RESPONSE=""
+  set +e  # 临时禁用 set -e
+  RESPONSE=$(docker exec aztec-sequencer sh -c "\
+    curl -s --connect-timeout 15 \
+      -X POST http://127.0.0.1:8880 \
+      -H 'Content-Type: application/json' \
+      -d '{\"jsonrpc\":\"2.0\",\"method\":\"nodeAdmin_setConfig\",\"params\":[{\"governanceProposerPayload\":\"$GOVERNANCE_PAYLOAD\"}],\"id\":1}' \
+    || echo '{\"error\":\"curl failed or timeout\"}'" 2>/dev/null || echo '{"error":"docker exec failed"}')
+  set -e  # 恢复 set -e
+
+  print_info "原始返回: $RESPONSE"
 
   # 检查返回结果
   if echo "$RESPONSE" | grep -q '"result":true'; then
@@ -212,15 +214,14 @@ vote_governance_proposal() {
     print_info "Payload: $GOVERNANCE_PAYLOAD"
   elif echo "$RESPONSE" | grep -q "method not found"; then
     print_info "失败：nodeAdmin_setConfig 方法未找到。"
-    print_info "可能原因："
-    print_info "  1. 节点版本不是 2.0.4"
-    print_info "  2. 未启用 admin RPC"
-    print_info "建议：执行 选项 4 升级到 2.0.4 并重启节点"
-  elif echo "$RESPONSE" | grep -q "Connection refused\|timeout"; then
+    print_info "请执行 选项 4 升级到 2.0.4 并重启节点"
+  elif echo "$RESPONSE" | grep -q "curl failed\|timeout\|docker exec failed"; then
     print_info "失败：无法连接到 admin RPC (8880)"
-    print_info "可能原因：admin RPC 未启动或端口未监听"
-  elif [ -z "$RESPONSE" ]; then
-    print_info "失败：无响应，请检查节点日志"
+    print_info "请检查："
+    print_info "  1. docker logs aztec-sequencer | grep 'Admin RPC'"
+    print_info "  2. ss -tulnp | grep 8880"
+  elif [ -z "$RESPONSE" ] || [[ "$RESPONSE" == "null" ]]; then
+    print_info "失败：空响应，请检查节点日志"
   else
     print_info "投票失败，返回：$RESPONSE"
   fi
@@ -237,7 +238,7 @@ vote_governance_proposal() {
   read -n 1
 }
 
-# 主逻辑：安装和启动 Aztec 节点（已启用 admin RPC）
+# 主逻辑：安装和启动 Aztec 节点（启用 admin RPC）
 install_and_start_node() {
   print_info "清理旧配置和数据..."
   rm -rf "$AZTEC_DIR/.env" "$AZTEC_DIR/docker-compose.yml"
@@ -323,8 +324,8 @@ services:
           --sequencer \
           $VALIDATOR_FLAG \
           $PUBLISHER_FLAG \
-          --admin-rpc-http-host 0.0.0.0 \
-          --admin-rpc-http-port 8880
+          --api.admin-rpc-http-host 0.0.0.0 \
+          --api.admin-rpc-http-port 8880
       "
     volumes:
       - /root/.aztec/alpha-testnet/data/:/data
@@ -339,7 +340,7 @@ EOF
   docker compose up -d || docker-compose up -d
 
   print_info "安装完成！"
-  print_info "请在 24 小时内执行 选项 9 完成投票！"
+  print_info "请在 30 秒后执行 选项 9 完成投票！"
 }
 
 # 停止、删除、更新、重启
@@ -357,7 +358,7 @@ stop_delete_update_restart_node() {
   docker pull "$AZTEC_IMAGE"
   cd "$AZTEC_DIR"
   docker compose up -d || docker-compose up -d
-  print_info "升级完成！请执行选项 9 投票。"
+  print_info "升级完成！请等待 30 秒后执行选项 9 投票。"
 }
 
 # 获取区块高度和同步证明
@@ -418,6 +419,7 @@ check_node_status() {
   docker ps | grep aztec-sequencer && print_info "容器运行中" || print_info "容器未运行"
   ss -tulnp | grep -q ':8080' && print_info "RPC 8080 监听" || print_info "RPC 未监听"
   ss -tulnp | grep -q ':8880' && print_info "Admin RPC 8880 监听" || print_info "Admin RPC 未监听"
+  docker logs aztec-sequencer --tail 10 | grep -i "Admin RPC" || true
 }
 
 # 主菜单
