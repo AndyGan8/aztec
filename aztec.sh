@@ -25,6 +25,80 @@ print_success() { echo -e "\033[1;32m[SUCCESS]\033[0m $1" >&2; }
 print_error()   { echo -e "\033[1;31m[ERROR]\033[0m $1" >&2; }
 print_warning() { echo -e "\033[1;33m[WARNING]\033[0m $1" >&2; }
 
+# ==================== 自动安装依赖 ====================
+auto_install_dependencies() {
+  print_info "开始自动安装依赖..."
+  
+  # 更新系统
+  apt-get update >/dev/null 2>&1
+  
+  # 安装基础工具
+  print_info "安装基础工具..."
+  apt-get install -y curl wget jq net-tools >/dev/null 2>&1
+  
+  # 安装 Docker
+  if ! command -v docker >/dev/null 2>&1; then
+    print_info "安装 Docker..."
+    curl -fsSL https://get.docker.com | sh >/dev/null 2>&1
+    systemctl enable docker >/dev/null 2>&1
+    systemctl start docker >/dev/null 2>&1
+  fi
+  
+  # 安装 Docker Compose
+  if ! command -v docker-compose >/dev/null 2>&1 && ! docker compose version >/dev/null 2>&1; then
+    print_info "安装 Docker Compose..."
+    apt-get install -y docker-compose-plugin >/dev/null 2>&1
+  fi
+  
+  # 安装 Foundry - 使用非交互方式
+  if ! command -v cast >/dev/null 2>&1; then
+    print_info "安装 Foundry..."
+    
+    # 方法1: 直接下载二进制文件
+    mkdir -p ~/.foundry/bin
+    if curl -L https://raw.githubusercontent.com/foundry-rs/foundry/master/foundryup/install -o /tmp/install-foundryup.sh; then
+      chmod +x /tmp/install-foundryup.sh
+      # 非交互式安装
+      yes | /tmp/install-foundryup.sh >/dev/null 2>&1 || true
+    fi
+    
+    # 确保 PATH
+    echo 'export PATH="$HOME/.foundry/bin:$PATH"' >> ~/.bashrc
+    export PATH="$HOME/.foundry/bin:$PATH"
+    
+    # 安装 foundry 工具
+    if [ -f "$HOME/.foundry/bin/foundryup" ]; then
+      "$HOME/.foundry/bin/foundryup" --no-modify-path >/dev/null 2>&1 || true
+    fi
+  fi
+  
+  # 安装 Aztec CLI
+  if ! command -v aztec >/dev/null 2>&1; then
+    print_info "安装 Aztec CLI..."
+    curl -sL https://install.aztec.network | bash >/dev/null 2>&1
+    export PATH="$HOME/.aztec/bin:$PATH"
+  fi
+  
+  # 重新加载 bashrc 以确保 PATH 生效
+  source ~/.bashrc >/dev/null 2>&1 || true
+  
+  # 最终检查
+  local missing_tools=()
+  for tool in docker jq cast aztec; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      missing_tools+=("$tool")
+    fi
+  done
+  
+  if [ ${#missing_tools[@]} -eq 0 ]; then
+    print_success "所有依赖安装完成！"
+    return 0
+  else
+    print_error "以下工具安装失败: ${missing_tools[*]}"
+    return 1
+  fi
+}
+
 # ==================== 环境检查 ====================
 validate_environment() {
   print_info "检查环境依赖..."
@@ -38,17 +112,21 @@ validate_environment() {
   done
   
   if [ ${#missing_tools[@]} -ne 0 ]; then
-    print_error "缺少必要的工具: ${missing_tools[*]}"
-    print_info "请先手动安装依赖："
-    echo "  curl -L https://foundry.paradigm.xyz | bash"
-    echo "  source ~/.bashrc && foundryup"
-    echo "  curl -sL https://install.aztec.network | bash"
-    return 1
+    print_warning "缺少必要的工具: ${missing_tools[*]}"
+    print_info "开始自动安装..."
+    if auto_install_dependencies; then
+      print_success "环境检查通过"
+      return 0
+    else
+      print_error "自动安装失败，请手动安装依赖"
+      echo "手动安装命令:"
+      echo "  apt-get update && apt-get install -y curl jq"
+      echo "  curl -fsSL https://get.docker.com | sh"
+      echo "  curl -L https://foundry.paradigm.xyz | bash && source ~/.bashrc && foundryup"
+      echo "  curl -sL https://install.aztec.network | bash"
+      return 1
+    fi
   fi
-  
-  # 确保 PATH 正确
-  export PATH="$HOME/.foundry/bin:$PATH"
-  export PATH="$HOME/.aztec/bin:$PATH"
   
   print_success "环境检查通过"
   return 0
