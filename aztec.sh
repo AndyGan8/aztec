@@ -25,6 +25,40 @@ print_success() { echo -e "\033[1;32m[SUCCESS]\033[0m $1" >&2; }
 print_error()   { echo -e "\033[1;31m[ERROR]\033[0m $1" >&2; }
 print_warning() { echo -e "\033[1;33m[WARNING]\033[0m $1" >&2; }
 
+# ==================== 直接安装 Foundry ====================
+install_foundry_direct() {
+  print_info "直接安装 Foundry 二进制文件..."
+  
+  # 创建目录
+  mkdir -p ~/.foundry/bin
+  
+  # 检测系统架构
+  local arch
+  case $(uname -m) in
+    x86_64) arch="x86_64" ;;
+    aarch64) arch="aarch64" ;;
+    *) arch="x86_64" ;;
+  esac
+  
+  # 下载 cast 二进制文件
+  local cast_url="https://github.com/foundry-rs/foundry/releases/download/nightly/cast-$arch-unknown-linux-gnu"
+  
+  print_info "下载 cast 工具..."
+  if curl -L -o ~/.foundry/bin/cast "$cast_url" 2>/dev/null; then
+    chmod +x ~/.foundry/bin/cast
+    print_success "cast 安装成功"
+  else
+    print_error "cast 下载失败"
+    return 1
+  fi
+  
+  # 添加到 PATH
+  echo 'export PATH="$HOME/.foundry/bin:$PATH"' >> ~/.bashrc
+  export PATH="$HOME/.foundry/bin:$PATH"
+  
+  return 0
+}
+
 # ==================== 自动安装依赖 ====================
 auto_install_dependencies() {
   print_info "开始自动安装依赖..."
@@ -50,33 +84,24 @@ auto_install_dependencies() {
     apt-get install -y docker-compose-plugin >/dev/null 2>&1
   fi
   
-  # 安装 Foundry - 使用非交互方式
+  # 安装 Foundry - 使用直接下载方法
   if ! command -v cast >/dev/null 2>&1; then
-    print_info "安装 Foundry..."
-    
-    # 方法1: 直接下载二进制文件
-    mkdir -p ~/.foundry/bin
-    if curl -L https://raw.githubusercontent.com/foundry-rs/foundry/master/foundryup/install -o /tmp/install-foundryup.sh; then
-      chmod +x /tmp/install-foundryup.sh
-      # 非交互式安装
-      yes | /tmp/install-foundryup.sh >/dev/null 2>&1 || true
-    fi
-    
-    # 确保 PATH
-    echo 'export PATH="$HOME/.foundry/bin:$PATH"' >> ~/.bashrc
-    export PATH="$HOME/.foundry/bin:$PATH"
-    
-    # 安装 foundry 工具
-    if [ -f "$HOME/.foundry/bin/foundryup" ]; then
-      "$HOME/.foundry/bin/foundryup" --no-modify-path >/dev/null 2>&1 || true
+    if ! install_foundry_direct; then
+      print_error "Foundry 安装失败"
+      return 1
     fi
   fi
   
   # 安装 Aztec CLI
   if ! command -v aztec >/dev/null 2>&1; then
     print_info "安装 Aztec CLI..."
-    curl -sL https://install.aztec.network | bash >/dev/null 2>&1
-    export PATH="$HOME/.aztec/bin:$PATH"
+    if curl -sL https://install.aztec.network | bash >/dev/null 2>&1; then
+      export PATH="$HOME/.aztec/bin:$PATH"
+      print_success "Aztec CLI 安装成功"
+    else
+      print_error "Aztec CLI 安装失败"
+      return 1
+    fi
   fi
   
   # 重新加载 bashrc 以确保 PATH 生效
