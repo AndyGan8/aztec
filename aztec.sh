@@ -117,17 +117,31 @@ install_nodejs() {
   install_package nodejs
 }
 
-# 安装 Foundry
+# 修复 Foundry 安装
 install_foundry() {
   if check_command cast; then
     print_info "Foundry 已安装。"
     return
   fi
   print_info "安装 Foundry..."
+  
+  # 下载并安装 foundryup
   curl -L https://foundry.paradigm.xyz | bash
-  source /root/.bashrc
-  if ! foundryup; then
-    print_error "Foundry 安装失败。"
+  
+  # 重新加载 bashrc
+  source "$HOME/.bashrc" 2>/dev/null || true
+  
+  # 确保 foundryup 在 PATH 中
+  export PATH="$HOME/.foundry/bin:$PATH"
+  
+  # 安装 Foundry
+  if ! foundryup 2>/dev/null; then
+    print_warning "Foundry 安装遇到警告，但继续执行..."
+  fi
+  
+  # 再次检查 cast 命令
+  if ! check_command cast; then
+    print_error "Foundry 安装失败，请手动安装: curl -L https://foundry.paradigm.xyz | bash && source ~/.bashrc && foundryup"
     exit 1
   fi
 }
@@ -275,13 +289,6 @@ check_node_status() {
         echo -e " P2P 端口 (40400): \033[1;31m不可用\033[0m"
       fi
 
-      # 检查进程状态
-      if docker exec aztec-sequencer ps aux 2>/dev/null | grep -q "node"; then
-        echo -e " Node.js 进程: \033[1;32m运行中\033[0m"
-      else
-        echo -e " Node.js 进程: \033[1;31m未运行\033[0m"
-      fi
-
       # 检查日志状态
       LOGS_COUNT=$(docker logs --tail 5 aztec-sequencer 2>/dev/null | wc -l)
       if [ "$LOGS_COUNT" -gt 0 ]; then
@@ -292,12 +299,6 @@ check_node_status() {
         if [ -n "$SYNC_STATUS" ]; then
           echo " 同步状态: $(echo "$SYNC_STATUS" | cut -c1-60)..."
         fi
-        
-        # 检查网络
-        NETWORK_STATUS=$(docker logs --tail 20 aztec-sequencer 2>/dev/null | grep -E "testnet|network" | tail -1)
-        if [ -n "$NETWORK_STATUS" ]; then
-          echo " 网络: testnet"
-        fi
       else
         echo -e " 日志输出: \033[1;31m无输出\033[0m"
       fi
@@ -307,27 +308,6 @@ check_node_status() {
     fi
   else
     echo -e " Aztec 容器: \033[1;31m未运行\033[0m"
-  fi
-  
-  echo
-  
-  # 检查配置文件
-  if [ -f "$AZTEC_DIR/.env" ]; then
-    echo -e " 配置文件: \033[1;32m存在\033[0m"
-    
-    # 检查验证者配置
-    if grep -q "VALIDATOR_PRIVATE_KEYS" "$AZTEC_DIR/.env"; then
-      VALIDATOR_KEY=$(grep "VALIDATOR_PRIVATE_KEYS" "$AZTEC_DIR/.env" | cut -d= -f2 | tr -d '"')
-      VALIDATOR_ADDRESS=$(cast wallet address --private-key "$VALIDATOR_KEY" 2>/dev/null || echo "未知")
-      echo " 当前验证者地址: $VALIDATOR_ADDRESS"
-    fi
-
-    if grep -q "COINBASE" "$AZTEC_DIR/.env"; then
-      COINBASE=$(grep "COINBASE" "$AZTEC_DIR/.env" | cut -d= -f2 | tr -d '"')
-      echo " 收益地址: $COINBASE"
-    fi
-  else
-    echo -e " 配置文件: \033[1;31m不存在\033[0m"
   fi
   
   echo
@@ -530,26 +510,35 @@ check_queue_status() {
   read -n 1
 }
 
-# 给新地址转账
-fund_new_address() {
-  if [ -f "$AZTEC_DIR/.env" ] && [ -n "${OLD_VALIDATOR_PRIVATE_KEY:-}" ] && [ -n "${ETH_RPC:-}" ]; then
+# 显示验证者信息
+show_validator_info() {
+  print_info "=== 验证者信息 ==="
+  
+  if [ -f "$AZTEC_DIR/.env" ]; then
+    if grep -q "VALIDATOR_PRIVATE_KEYS" "$AZTEC_DIR/.env"; then
+      VALIDATOR_KEY=$(grep "VALIDATOR_PRIVATE_KEYS" "$AZTEC_DIR/.env" | cut -d= -f2 | tr -d '"')
+      VALIDATOR_ADDRESS=$(cast wallet address --private-key "$VALIDATOR_KEY" 2>/dev/null || echo "未知")
+      echo -e " 当前验证者地址: \033[1;36m$VALIDATOR_ADDRESS\033[0m"
+    fi
+    
     if grep -q "COINBASE" "$AZTEC_DIR/.env"; then
-      NEW_ADDRESS=$(grep "COINBASE" "$AZTEC_DIR/.env" | cut -d= -f2)
-      print_info "给新地址转账 0.2 Sepolia ETH..."
-      read -p "确认转账？(y/n): " confirm
-      if [[ "$confirm" == "y" ]]; then
-        if cast send "$NEW_ADDRESS" --value 0.2ether --private-key "$OLD_VALIDATOR_PRIVATE_KEY" --rpc-url "$ETH_RPC"; then
-          print_success "转账成功！"
-        else
-          print_error "转账失败！"
-        fi
-      fi
-    else
-      print_error "未找到新验证者地址。"
+      COINBASE=$(grep "COINBASE" "$AZTEC_DIR/.env" | cut -d= -f2 | tr -d '"')
+      echo -e " 收益地址: \033[1;36m$COINBASE\033[0m"
     fi
   else
-    print_error "无法执行转账，请先安装节点。"
+    print_error "未找到节点配置。"
   fi
+  
+  # 检查密钥文件
+  if [ -f "$HOME/.aztec/keystore/key1.json" ]; then
+    echo -e " BLS 密钥: \033[1;32m已生成\033[0m"
+  else
+    echo -e " BLS 密钥: \033[1;31m未生成\033[0m"
+  fi
+  
+  echo
+  echo "按任意键继续..."
+  read -n 1
 }
 
 # 停止和更新节点
@@ -613,37 +602,6 @@ delete_node_data() {
   print_success "删除完成！"
 }
 
-# 显示验证者信息
-show_validator_info() {
-  print_info "=== 验证者信息 ==="
-  
-  if [ -f "$AZTEC_DIR/.env" ]; then
-    if grep -q "VALIDATOR_PRIVATE_KEYS" "$AZTEC_DIR/.env"; then
-      VALIDATOR_KEY=$(grep "VALIDATOR_PRIVATE_KEYS" "$AZTEC_DIR/.env" | cut -d= -f2 | tr -d '"')
-      VALIDATOR_ADDRESS=$(cast wallet address --private-key "$VALIDATOR_KEY" 2>/dev/null || echo "未知")
-      echo -e " 当前验证者地址: \033[1;36m$VALIDATOR_ADDRESS\033[0m"
-    fi
-    
-    if grep -q "COINBASE" "$AZTEC_DIR/.env"; then
-      COINBASE=$(grep "COINBASE" "$AZTEC_DIR/.env" | cut -d= -f2 | tr -d '"')
-      echo -e " 收益地址: \033[1;36m$COINBASE\033[0m"
-    fi
-  else
-    print_error "未找到节点配置。"
-  fi
-  
-  # 检查密钥文件
-  if [ -f "$HOME/.aztec/keystore/key1.json" ]; then
-    echo -e " BLS 密钥: \033[1;32m已生成\033[0m"
-  else
-    echo -e " BLS 密钥: \033[1;31m未生成\033[0m"
-  fi
-  
-  echo
-  echo "按任意键继续..."
-  read -n 1
-}
-
 # 主菜单函数
 main_menu() {
   while true; do
@@ -656,13 +614,12 @@ main_menu() {
     echo "2. 查看节点日志"
     echo "3. 查看节点状态"
     echo "4. 检查排队状态"
-    echo "5. 给新地址转账"
-    echo "6. 显示验证者信息"
-    echo "7. 停止和更新节点"
-    echo "8. 删除节点数据"
-    echo "9. 退出"
+    echo "5. 显示验证者信息"
+    echo "6. 停止和更新节点"
+    echo "7. 删除节点数据"
+    echo "8. 退出"
     echo -e "\033[1;36m========================================\033[0m"
-    read -p "请输入选项 (1-9): " choice
+    read -p "请输入选项 (1-8): " choice
 
     case $choice in
       1)
@@ -680,24 +637,19 @@ main_menu() {
         check_queue_status
         ;;
       5)
-        fund_new_address
-        echo "按任意键继续..."
-        read -n 1
-        ;;
-      6)
         show_validator_info
         ;;
-      7)
+      6)
         stop_and_update_node
         echo "按任意键继续..."
         read -n 1
         ;;
-      8)
+      7)
         delete_node_data
         echo "按任意键继续..."
         read -n 1
         ;;
-      9)
+      8)
         print_info "退出脚本。"
         exit 0
         ;;
