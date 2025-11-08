@@ -25,6 +25,114 @@ print_success() { echo -e "\033[1;32m[SUCCESS]\033[0m $1" >&2; }
 print_error()   { echo -e "\033[1;31m[ERROR]\033[0m $1" >&2; }
 print_warning() { echo -e "\033[1;33m[WARNING]\033[0m $1" >&2; }
 
+# ==================== 环境检查与安装 ====================
+install_dependencies() {
+  print_info "检查并安装必要的依赖..."
+  
+  # 更新系统
+  apt-get update >/dev/null 2>&1
+  
+  # 安装基础工具
+  local base_packages=("curl" "jq" "net-tools")
+  for pkg in "${base_packages[@]}"; do
+    if ! dpkg -l | grep -q "^ii  $pkg "; then
+      print_info "安装 $pkg..."
+      apt-get install -y "$pkg" >/dev/null 2>&1
+    fi
+  done
+  
+  # 检查并安装 Docker
+  if ! command -v docker >/dev/null 2>&1; then
+    print_info "安装 Docker..."
+    curl -fsSL https://get.docker.com | sh >/dev/null 2>&1
+    systemctl enable docker >/dev/null 2>&1
+    systemctl start docker >/dev/null 2>&1
+  fi
+  
+  # 检查并安装 Docker Compose
+  if ! command -v docker-compose >/dev/null 2>&1 && ! docker compose version >/dev/null 2>&1; then
+    print_info "安装 Docker Compose..."
+    apt-get install -y docker-compose-plugin >/dev/null 2>&1
+  fi
+  
+  # 检查并安装 Foundry (cast)
+  if ! command -v cast >/dev/null 2>&1; then
+    print_info "安装 Foundry..."
+    curl -L https://foundry.paradigm.xyz | bash >/dev/null 2>&1
+    # 重新加载 bashrc
+    if [ -f ~/.bashrc ]; then
+      source ~/.bashrc >/dev/null 2>&1
+    fi
+    # 确保 foundryup 在 PATH 中
+    export PATH="$HOME/.foundry/bin:$PATH"
+    # 安装 foundry
+    ~/.foundry/bin/foundryup >/dev/null 2>&1 || {
+      print_warning "Foundry 安装遇到问题，尝试替代方法..."
+      curl -L https://foundry.paradigm.xyz | bash
+      source ~/.bashrc
+      foundryup
+    }
+  fi
+  
+  # 检查并安装 Aztec CLI
+  if ! command -v aztec >/dev/null 2>&1; then
+    print_info "安装 Aztec CLI..."
+    curl -sL https://install.aztec.network | bash >/dev/null 2>&1
+    export PATH="$HOME/.aztec/bin:$PATH"
+  fi
+  
+  # 最终验证
+  local missing_tools=()
+  for tool in docker jq cast aztec; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      missing_tools+=("$tool")
+    fi
+  done
+  
+  if [ ${#missing_tools[@]} -ne 0 ]; then
+    print_error "以下工具安装失败: ${missing_tools[*]}"
+    print_info "请手动安装:"
+    echo "  # 安装 Docker"
+    echo "  curl -fsSL https://get.docker.com | sh"
+    echo "  # 安装 Foundry"  
+    echo "  curl -L https://foundry.paradigm.xyz | bash && source ~/.bashrc && foundryup"
+    echo "  # 安装 Aztec CLI"
+    echo "  curl -sL https://install.aztec.network | bash"
+    return 1
+  fi
+  
+  print_success "所有依赖安装完成"
+  return 0
+}
+
+validate_environment() {
+  print_info "检查环境依赖..."
+  
+  local missing_tools=()
+  
+  for tool in docker jq cast aztec; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      missing_tools+=("$tool")
+    fi
+  done
+  
+  if [ ${#missing_tools[@]} -ne 0 ]; then
+    print_warning "缺少必要的工具: ${missing_tools[*]}"
+    print_info "开始自动安装..."
+    if ! install_dependencies; then
+      print_error "依赖安装失败，请手动安装上述工具"
+      return 1
+    fi
+  fi
+  
+  # 确保 PATH 正确
+  export PATH="$HOME/.foundry/bin:$PATH"
+  export PATH="$HOME/.aztec/bin:$PATH"
+  
+  print_success "环境检查通过"
+  return 0
+}
+
 # ==================== 安全函数 ====================
 secure_cleanup() {
   print_info "清理敏感信息..."
@@ -40,27 +148,6 @@ backup_keys() {
     cp "$KEYSTORE_FILE" "$BACKUP_DIR/"
     print_success "密钥已备份到: $BACKUP_DIR/"
   fi
-}
-
-validate_environment() {
-  print_info "检查环境依赖..."
-  
-  local missing_tools=()
-  
-  for tool in docker jq cast aztec; do
-    if ! command -v "$tool" >/dev/null 2>&1; then
-      missing_tools+=("$tool")
-    fi
-  done
-  
-  if [ ${#missing_tools[@]} -ne 0 ]; then
-    print_error "缺少必要的工具: ${missing_tools[*]}"
-    print_info "请先运行: bash -i <(curl -s https://install.aztec.network) && curl -L https://foundry.paradigm.xyz | bash && source /root/.bashrc && foundryup && aztec-up 2.1.2"
-    return 1
-  fi
-  
-  print_success "环境检查通过"
-  return 0
 }
 
 # ==================== RPC 检查 ====================
