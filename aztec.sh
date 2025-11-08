@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 检查是否以 root 权限运行
+# 检查 root 权限
 if [ "$(id -u)" -ne 0 ]; then
   echo "本脚本必须以 root 权限运行。"
   exit 1
 fi
 
-# 定义常量
+# ==================== 常量定义 ====================
 MIN_DOCKER_VERSION="20.10"
 MIN_COMPOSE_VERSION="1.29.2"
 AZTEC_CLI_URL="https://install.aztec.network"
@@ -20,66 +20,37 @@ NETWORK="testnet"
 GOVERNANCE_PROPOSER_PAYLOAD="0xDCd9DdeAbEF70108cE02576df1eB333c4244C666"
 DASHTEC_URL="https://dashtec.xyz"
 
-# 函数：打印信息
-print_info() {
-  echo -e "\033[1;34m[INFO]\033[0m $1"
-}
+# ==================== 打印函数 ====================
+print_info()    { echo -e "\033[1;34m[INFO]\033[0m $1"; }
+print_success() { echo -e "\033[1;32m[SUCCESS]\033[0m $1"; }
+print_error()   { echo -e "\033[1;31m[ERROR]\033[0m $1"; }
+print_warning() { echo -e "\033[1;33m[WARNING]\033[0m $1"; }
 
-print_success() {
-  echo -e "\033[1;32m[SUCCESS]\033[0m $1"
-}
+# ==================== 工具函数 ====================
+check_command() { command -v "$1" >/dev/null 2>&1; }
+version_ge() { [ "$(printf '%s\n' "$1" "$2" | sort -V | head -n1)" = "$2" ]; }
 
-print_error() {
-  echo -e "\033[1;31m[ERROR]\033[0m $1"
-}
-
-print_warning() {
-  echo -e "\033[1;33m[WARNING]\033[0m $1"
-}
-
-# 函数：检查命令是否存在
-check_command() {
-  command -v "$1" >/dev/null 2>&1
-}
-
-# 函数：比较版本号
-version_ge() {
-  [ "$(printf '%s\n' "$1" "$2" | sort -V | head -n1)" = "$2" ]
-}
-
-# 函数：安装依赖
 install_package() {
   local pkg=$1
   print_info "安装 $pkg..."
-  apt-get install -y "$pkg" >/dev/null 2>&1 || {
-    print_error "安装 $pkg 失败"
-    exit 1
-  }
+  apt-get install -y "$pkg" >/dev/null 2>&1 || { print_error "安装 $pkg 失败"; exit 1; }
 }
 
-# 更新 apt 源
 update_apt() {
-  if [ -z "${APT_UPDATED:-}" ]; then
+  [ -z "${APT_UPDATED:-}" ] && {
     print_info "更新 apt 源..."
     apt-get update >/dev/null 2>&1
     APT_UPDATED=1
-  fi
+  }
 }
 
-# 检查并安装 Docker
+# ==================== 依赖安装 ====================
 install_docker() {
   if check_command docker; then
-    local version
-    version=$(docker --version | grep -oP '\d+\.\d+\.\d+' || echo "0.0.0")
-    if version_ge "$version" "$MIN_DOCKER_VERSION"; then
-      print_info "Docker 已安装，版本 $version。"
-      return
-    else
-      print_info "Docker 版本过低，将重新安装..."
-    fi
-  else
-    print_info "安装 Docker..."
+    local v=$(docker --version | grep -oP '\d+\.\d+\.\d+' || echo "0.0.0")
+    version_ge "$v" "$MIN_DOCKER_VERSION" && { print_info "Docker 已安装，版本 $v"; return; }
   fi
+  print_info "安装 Docker..."
   update_apt
   install_package "apt-transport-https ca-certificates curl gnupg-agent software-properties-common"
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add - >/dev/null 2>&1
@@ -88,30 +59,20 @@ install_docker() {
   install_package "docker-ce docker-ce-cli containerd.io"
 }
 
-# 检查并安装 Docker Compose
 install_docker_compose() {
   if check_command docker-compose || docker compose version >/dev/null 2>&1; then
-    local version
-    version=$(docker-compose --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' || docker compose version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' || echo "0.0.0")
-    if version_ge "$version" "$MIN_COMPOSE_VERSION"; then
-      print_info "Docker Compose 已安装，版本 $version。"
-      return
-    else
-      print_info "Docker Compose 版本过低，将重新安装..."
-    fi
-  else
-    print_info "安装 Docker Compose..."
+    local v=$(docker-compose --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' || docker compose version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' || echo "0.0.0")
+    version_ge "$v" "$MIN_COMPOSE_VERSION" && { print_info "Docker Compose 已安装，版本 $v"; return; }
   fi
+  print_info "安装 Docker Compose..."
   update_apt
   install_package docker-compose-plugin
 }
 
-# 检查并安装 Node.js
 install_nodejs() {
   if check_command node; then
-    local version
-    version=$(node --version | grep -oP '\d+\.\d+\.\d+' || echo "0.0.0")
-    print_info "Node.js 已安装，版本 $version。"
+    local v=$(node --version | grep -oP '\d+\.\d+\.\d+' || echo "0.0.0")
+    print_info "Node.js 已安装，版本 $v"
     return
   fi
   print_info "安装 Node.js..."
@@ -120,14 +81,12 @@ install_nodejs() {
   install_package nodejs
 }
 
-# 终极 Foundry 安装：检测 + 预编译 + 兜底
+# ==================== Foundry 安装（终极修复） ====================
 install_foundry() {
-  # 确保 PATH 包含 foundry
   export PATH="$HOME/.foundry/bin:$PATH"
-
   if check_command cast; then
-    local version=$(cast --version 2>/dev/null | head -n1 || echo "unknown")
-    print_info "Foundry 已安装，跳过安装: $version"
+    local v=$(cast --version 2>/dev/null | head -n1 || echo "unknown")
+    print_info "Foundry 已安装: $v"
     return
   fi
 
@@ -138,33 +97,29 @@ install_foundry() {
 
   local os=$(uname -s | tr '[:upper:]' '[:lower:]')
   local arch=$(uname -m)
-  local tmpdir="/tmp/foundry-install"
-  mkdir -p "$tmpdir" ~/.foundry/bin
-  cd "$tmpdir"
+  local tmp="/tmp/foundry-install"
+  mkdir -p "$tmp" ~/.foundry/bin
+  cd "$tmp"
 
   # 策略 1: 预编译 nightly
   local url="https://github.com/foundry-rs/foundry/releases/download/nightly/foundry_nightly_${os}_${arch}.tar.gz"
   print_info "下载预编译 Foundry nightly..."
-
   if curl -L --connect-timeout 10 --retry 3 -o foundry.tar.gz "$url" --silent --show-error; then
-    local size=$(wc -c < foundry.tar.gz)
-    if [ "$size" -gt 10000000 ]; then
-      if tar -xzf foundry.tar.gz -C ~/.foundry/bin/ >/dev/null 2>&1; then
-        export PATH="$HOME/.foundry/bin:$PATH"
+    [ "$(wc -c < foundry.tar.gz)" -gt 10000000 ] && {
+      tar -xzf foundry.tar.gz -C ~/.foundry/bin/ >/dev/null 2>&1 && {
         if cast --version >/dev/null 2>&1; then
           print_success "预编译 Foundry 安装成功: $(cast --version | head -n1)"
-          cd / && rm -rf "$tmpdir"
+          cd / && rm -rf "$tmp"
           return
         fi
-      fi
-    fi
+      }
+    }
   fi
 
-  # 策略 2: foundryup 兜底
+  # 策略 2: foundryup
   print_warning "预编译失败，执行 foundryup..."
   cd /
-  rm -rf "$tmpdir"
-
+  rm -rf "$tmp"
   curl -L https://foundry.paradigm.xyz | bash >/dev/null 2>&1
   export PATH="$HOME/.foundry/bin:$PATH"
   ~/.foundry/bin/foundryup >/dev/null 2>&1 || true
@@ -177,75 +132,59 @@ install_foundry() {
   fi
 }
 
-# 安装 Aztec CLI
+# ==================== Aztec CLI ====================
 install_aztec_cli() {
   print_info "安装 Aztec CLI..."
-  if ! curl -sL "$AZTEC_CLI_URL" | bash; then
-    print_error "Aztec CLI 安装失败。"
-    exit 1
-  fi
+  curl -sL "$AZTEC_CLI_URL" | bash >/dev/null 2>&1 || { print_error "Aztec CLI 安装失败"; exit 1; }
   export PATH="$HOME/.aztec/bin:$PATH"
-  if ! aztec-up latest; then
-    print_error "aztec-up latest 执行失败。"
-    exit 1
-  fi
+  aztec-up latest >/dev/null 2>&1 || { print_error "aztec-up latest 失败"; exit 1; }
 }
 
-# 授权 STAKE 代币
+# ==================== 核心功能 ====================
 authorize_stake() {
-  local private_key=$1
-  local rpc_url=$2
-  print_info "授权 200k STAKE 给 Rollup 合约..."
-  if ! cast send $STAKE_TOKEN "approve(address,uint256)" $ROLLUP_CONTRACT 200000ether \
-    --private-key "$private_key" --rpc-url "$rpc_url"; then
-    print_error "STAKE 授权失败！请检查："
-    print_error "1. 私钥是否正确"
-    print_error "2. 地址是否有 200k STAKE"
-    print_error "3. RPC 是否可用"
+  local pk=$1 rpc=$2
+  print_info "授权 200k STAKE..."
+  cast send $STAKE_TOKEN "approve(address,uint256)" $ROLLUP_CONTRACT 200000ether \
+    --private-key "$pk" --rpc-url "$rpc" >/dev/null 2>&1 || {
+    print_error "STAKE 授权失败！请检查：私钥、余额、RPC"
     exit 1
-  fi
+  }
   print_success "STAKE 授权成功！"
 }
 
-# 生成 BLS 密钥
+# 关键修复：BLS 密钥生成（静默返回）
 generate_bls_keys() {
   print_info "生成新的 BLS 密钥对..."
-  rm -rf "$HOME/.aztec/keystore"
-  if ! aztec validator-keys new --fee-recipient 0x0000000000000000000000000000000000000000000000000000000000000000; then
-    print_error "BLS 密钥生成失败。"
+  rm -rf "$HOME/.aztec/keystore" 2>/dev/null || true
+  aztec validator-keys new --fee-recipient 0x0000000000000000000000000000000000000000000000000000000000000000 >/dev/null 2>&1 || {
+    print_error "BLS 密钥生成失败"
     exit 1
-  fi
-  local key_file="$HOME/.aztec/keystore/key1.json"
-  if [ ! -f "$key_file" ]; then
-    print_error "未找到生成的密钥文件。"
-    exit 1
-  fi
-  if ! check_command jq; then install_package jq; fi
-  local eth_private_key=$(jq -r '.eth' "$key_file")
-  local bls_private_key=$(jq -r '.bls' "$key_file")
-  local attester_address=$(cast wallet address --private-key "$eth_private_key")
-  echo "$eth_private_key" "$bls_private_key" "$attester_address"
+  }
+  local file="$HOME/.aztec/keystore/key1.json"
+  [ ! -f "$file" ] && { print_error "密钥文件未生成"; exit 1; }
+  [ ! -f "$(command -v jq)" ] && install_package jq
+  local eth=$(jq -r '.eth' "$file")
+  local bls=$(jq -r '.bls' "$file")
+  local addr=$(cast wallet address --private-key "$eth" 2>/dev/null)
+  [[ "$addr" =~ ^0x[a-fA-F0-9]{40}$ ]] || { print_error "地址生成失败"; exit 1; }
+  print_success "新验证者地址: $addr"
+  echo "$eth $bls $addr"
 }
 
-# 注册验证者
 register_validator() {
-  local old_private_key=$1
-  local attester_address=$2
-  local bls_private_key=$3
-  local rpc_url=$4
-  local withdraw_address=$5
+  local old_pk=$1 attester=$2 bls=$3 rpc=$4 withdraw=$5
   print_info "注册验证者到 L1..."
-  if ! aztec add-l1-validator \
-    --l1-rpc-urls "$rpc_url" \
+  aztec add-l1-validator \
+    --l1-rpc-urls "$rpc" \
     --network testnet \
-    --private-key "$old_private_key" \
-    --attester "$attester_address" \
-    --withdrawer "$withdraw_address" \
-    --bls-secret-key "$bls_private_key" \
-    --rollup $ROLLUP_CONTRACT; then
-    print_error "验证者注册失败！请检查网络、RPC 和参数"
+    --private-key "$old_pk" \
+    --attester "$attester" \
+    --withdrawer "$withdraw" \
+    --bls-secret-key "$bls" \
+    --rollup $ROLLUP_CONTRACT >/dev/null 2>&1 || {
+    print_error "验证者注册失败！请检查网络、RPC、参数"
     exit 1
-  fi
+  }
   print_success "验证者注册成功！"
 }
 
@@ -254,21 +193,7 @@ validate_url() { [[ "$1" =~ ^https?:// ]] || { print_error "$2 格式无效"; ex
 validate_address() { [[ "$1" =~ ^0x[a-fA-F0-9]{40}$ ]] || { print_error "$2 格式无效"; exit 1; }; }
 validate_private_key() { [[ "$1" =~ ^0x[a-fA-F0-9]{64}$ ]] || { print_error "$2 格式无效"; exit 1; }; }
 
-# 查看节点状态
-check_node_status() {
-  print_info "=== 节点状态检查 ==="
-  if docker ps -q -f name=aztec-sequencer | grep -q .; then
-    local status=$(docker inspect aztec-sequencer --format='{{.State.Status}}' 2>/dev/null || echo "unknown")
-    echo -e " 容器状态: \033[1;32m$status\033[0m"
-    docker port aztec-sequencer 8080 >/dev/null 2>&1 && echo -e " RPC 8080: \033[1;32m可用\033[0m" || echo -e " RPC 8080: \033[1;31m不可用\033[0m"
-    docker port aztec-sequencer 40400 >/dev/null 2>&1 && echo -e " P2P 40400: \033[1;32m可用\033[0m" || echo -e " P2P 40400: \033[1;31m不可用\033[0m"
-  else
-    echo -e " 容器: \033[1;31m未运行\033[0m"
-  fi
-  echo; read -n 1 -s -r -p "按任意键继续..."
-}
-
-# 安装并启动节点
+# ==================== 节点安装主流程 ====================
 install_and_start_node() {
   print_info "清理旧数据..."
   rm -rf "$AZTEC_DIR" "$DATA_DIR" /tmp/aztec-world-state-*
@@ -304,9 +229,10 @@ install_and_start_node() {
   print_info "旧地址: $OLD_ADDRESS"
 
   authorize_stake "$OLD_VALIDATOR_PRIVATE_KEY" "$ETH_RPC"
+
+  # 修复：静默读取密钥
   read eth_private_key bls_private_key attester_address <<< $(generate_bls_keys)
-  print_success "新验证者地址: $attester_address"
-  print_warning "请给新地址转 0.2 ETH gas 费！"
+  print_warning "请给 $attester_address 转 0.2 Sepolia ETH 作为 gas 费！"
 
   register_validator "$OLD_VALIDATOR_PRIVATE_KEY" "$attester_address" "$bls_private_key" "$ETH_RPC" "$WITHDRAW_ADDRESS"
 
@@ -383,7 +309,51 @@ EOF
   print_warning "排队约 40 分钟/epoch，请耐心等待"
 }
 
-# 主菜单
+# ==================== 菜单功能 ====================
+check_node_status() {
+  print_info "=== 节点状态 ==="
+  docker ps -a --filter "name=aztec-sequencer" | grep -q aztec-sequencer || { echo "未运行"; return; }
+  local s=$(docker inspect aztec-sequencer --format='{{.State.Status}}')
+  echo "状态: $s"
+  read -n 1 -s -r -p "按任意键继续..."
+}
+
+view_logs() { docker logs -f --tail 100 aztec-sequencer 2>/dev/null || print_error "未运行"; }
+
+check_queue() {
+  [ -f "$AZTEC_DIR/.env" ] && grep "COINBASE" "$AZTEC_DIR/.env" | cut -d= -f2 | xargs -I{} echo "地址: {} | 查询: $DASHTEC_URL/validator/{}"
+  read -n 1
+}
+
+show_info() {
+  [ -f "$AZTEC_DIR/.env" ] && {
+    local key=$(grep VALIDATOR_PRIVATE_KEYS "$AZTEC_DIR/.env" | cut -d= -f2)
+    local addr=$(cast wallet address --private-key "$key" 2>/dev/null || echo "未知")
+    local coin=$(grep COINBASE "$AZTEC_DIR/.env" | cut -d= -f2)
+    echo "验证者: $addr"
+    echo "收益: $coin"
+  }
+  read -n 1
+}
+
+update_node() {
+  docker stop aztec-sequencer; docker rm aztec-sequencer
+  aztec-up latest
+  docker pull $AZTEC_IMAGE
+  cd "$AZTEC_DIR"; docker compose up -d || docker-compose up -d
+  print_success "更新完成"
+  read -n 1
+}
+
+delete_data() {
+  read -p "确认删除？(y/n): " c; [[ $c != y ]] && return
+  docker stop aztec-sequencer; docker rm aztec-sequencer
+  rm -rf "$AZTEC_DIR" "$DATA_DIR"
+  print_success "已删除"
+  read -n 1
+}
+
+# ==================== 主菜单 ====================
 main_menu() {
   while true; do
     clear
@@ -400,20 +370,19 @@ main_menu() {
     echo "7. 删除节点数据"
     echo "8. 退出"
     echo -e "\033[1;36m========================================\033[0m"
-    read -p "请选择 (1-8): " choice
-    case $choice in
-      1) install_and_start_node; read -n 1 -s -r -p "按任意键继续..." ;;
-      2) docker logs -f --tail 100 aztec-sequencer 2>/dev/null || print_error "未运行" ;;
+    read -p "请选择 (1-8): " c
+    case $c in
+      1) install_and_start_node; read -n 1 ;;
+      2) view_logs ;;
       3) check_node_status ;;
-      4) grep -q "COINBASE" "$AZTEC_DIR/.env" 2>/dev/null && echo "排队地址: $(grep COINBASE "$AZTEC_DIR/.env" | cut -d= -f2)"; read -n 1 ;;
-      5) grep -q "VALIDATOR_PRIVATE_KEYS" "$AZTEC_DIR/.env" 2>/dev/null && cast wallet address --private-key "$(grep VALIDATOR_PRIVATE_KEYS "$AZTEC_DIR/.env" | cut -d= -f2)"; read -n 1 ;;
-      6) docker stop aztec-sequencer; docker rm aztec-sequencer; aztec-up latest; docker pull $AZTEC_IMAGE; cd "$AZTEC_DIR"; docker compose up -d || docker-compose up -d; print_success "更新完成"; read -n 1 ;;
-      7) read -p "确认删除？(y/n): " c; [[ $c == y ]] && docker stop aztec-sequencer; docker rm aztec-sequencer; rm -rf "$AZTEC_DIR" "$DATA_DIR"; print_success "已删除"; read -n 1 ;;
+      4) check_queue ;;
+      5) show_info ;;
+      6) update_node ;;
+      7) delete_data ;;
       8) exit 0 ;;
       *) print_error "无效选项"; read -n 1 ;;
     esac
   done
 }
 
-# 启动
 main_menu
