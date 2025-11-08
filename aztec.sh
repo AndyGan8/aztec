@@ -21,10 +21,10 @@ GOVERNANCE_PROPOSER_PAYLOAD="0xDCd9DdeAbEF70108cE02576df1eB333c4244C666"
 DASHTEC_URL="https://dashtec.xyz"
 
 # ==================== 打印函数 ====================
-print_info()    { echo -e "\033[1;34m[INFO]\033[0m $1"; }
-print_success() { echo -e "\033[1;32m[SUCCESS]\033[0m $1"; }
-print_error()   { echo -e "\033[1;31m[ERROR]\033[0m $1"; }
-print_warning() { echo -e "\033[1;33m[WARNING]\033[0m $1"; }
+print_info()    { echo -e "\033[1;34m[INFO]\033[0m $1" >&2; }
+print_success() { echo -e "\033[1;32m[SUCCESS]\033[0m $1" >&2; }
+print_error()   { echo -e "\033[1;31m[ERROR]\033[0m $1" >&2; }
+print_warning() { echo -e "\033[1;33m[WARNING]\033[0m $1" >&2; }
 
 # ==================== 工具函数 ====================
 check_command() { command -v "$1" >/dev/null 2>&1; }
@@ -152,7 +152,7 @@ authorize_stake() {
   print_success "STAKE 授权成功！"
 }
 
-# 关键修复：BLS 密钥生成（静默返回）
+# 关键修复：BLS 密钥生成（静默返回，使用 printf 避免污染 stdout）
 generate_bls_keys() {
   print_info "生成新的 BLS 密钥对..."
   rm -rf "$HOME/.aztec/keystore" 2>/dev/null || true
@@ -167,8 +167,8 @@ generate_bls_keys() {
   local bls=$(jq -r '.bls' "$file")
   local addr=$(cast wallet address --private-key "$eth" 2>/dev/null)
   [[ "$addr" =~ ^0x[a-fA-F0-9]{40}$ ]] || { print_error "地址生成失败"; exit 1; }
-  print_success "新验证者地址: $addr"
-  echo "$eth $bls $addr"
+  print_success "新验证者地址: $addr" >&2
+  printf "%s %s %s" "$eth" "$bls" "$addr"
 }
 
 register_validator() {
@@ -230,7 +230,7 @@ install_and_start_node() {
 
   authorize_stake "$OLD_VALIDATOR_PRIVATE_KEY" "$ETH_RPC"
 
-  # 修复：静默读取密钥
+  # 修复：静默读取密钥（printf 确保纯数据输出）
   read eth_private_key bls_private_key attester_address <<< $(generate_bls_keys)
   print_warning "请给 $attester_address 转 0.2 Sepolia ETH 作为 gas 费！"
 
@@ -312,17 +312,17 @@ EOF
 # ==================== 菜单功能 ====================
 check_node_status() {
   print_info "=== 节点状态 ==="
-  docker ps -a --filter "name=aztec-sequencer" | grep -q aztec-sequencer || { echo "未运行"; return; }
+  docker ps -a --filter "name=aztec-sequencer" | grep -q aztec-sequencer || { echo "未运行" >&2; return; }
   local s=$(docker inspect aztec-sequencer --format='{{.State.Status}}')
-  echo "状态: $s"
-  read -n 1 -s -r -p "按任意键继续..."
+  echo "状态: $s" >&2
+  read -n 1 -s -r -p "按任意键继续..." >&2
 }
 
 view_logs() { docker logs -f --tail 100 aztec-sequencer 2>/dev/null || print_error "未运行"; }
 
 check_queue() {
-  [ -f "$AZTEC_DIR/.env" ] && grep "COINBASE" "$AZTEC_DIR/.env" | cut -d= -f2 | xargs -I{} echo "地址: {} | 查询: $DASHTEC_URL/validator/{}"
-  read -n 1
+  [ -f "$AZTEC_DIR/.env" ] && grep "COINBASE" "$AZTEC_DIR/.env" | cut -d= -f2 | xargs -I{} echo "地址: {} | 查询: $DASHTEC_URL/validator/{}" >&2
+  read -n 1 >&2
 }
 
 show_info() {
@@ -330,10 +330,10 @@ show_info() {
     local key=$(grep VALIDATOR_PRIVATE_KEYS "$AZTEC_DIR/.env" | cut -d= -f2)
     local addr=$(cast wallet address --private-key "$key" 2>/dev/null || echo "未知")
     local coin=$(grep COINBASE "$AZTEC_DIR/.env" | cut -d= -f2)
-    echo "验证者: $addr"
-    echo "收益: $coin"
+    echo "验证者: $addr" >&2
+    echo "收益: $coin" >&2
   }
-  read -n 1
+  read -n 1 >&2
 }
 
 update_node() {
@@ -342,7 +342,7 @@ update_node() {
   docker pull $AZTEC_IMAGE
   cd "$AZTEC_DIR"; docker compose up -d || docker-compose up -d
   print_success "更新完成"
-  read -n 1
+  read -n 1 >&2
 }
 
 delete_data() {
@@ -350,7 +350,7 @@ delete_data() {
   docker stop aztec-sequencer; docker rm aztec-sequencer
   rm -rf "$AZTEC_DIR" "$DATA_DIR"
   print_success "已删除"
-  read -n 1
+  read -n 1 >&2
 }
 
 # ==================== 主菜单 ====================
@@ -359,7 +359,7 @@ main_menu() {
     clear
     echo -e "\033[1;36m========================================\033[0m"
     echo -e "\033[1;36m      Aztec 2.1.2 测试网节点管理脚本\033[0m"
-    echo -e "\033[1;36m           (社区终极修复版)\033[0m"
+    echo -e "\033[1;36m           (社区终极修复版 v2.0)\033[0m"
     echo -e "\033[1;36m========================================\033[0m"
     echo "1. 安装并启动节点 (自动注册)"
     echo "2. 查看节点日志"
@@ -372,7 +372,7 @@ main_menu() {
     echo -e "\033[1;36m========================================\033[0m"
     read -p "请选择 (1-8): " c
     case $c in
-      1) install_and_start_node; read -n 1 ;;
+      1) install_and_start_node; read -n 1 >&2 ;;
       2) view_logs ;;
       3) check_node_status ;;
       4) check_queue ;;
@@ -380,7 +380,7 @@ main_menu() {
       6) update_node ;;
       7) delete_data ;;
       8) exit 0 ;;
-      *) print_error "无效选项"; read -n 1 ;;
+      *) print_error "无效选项"; read -n 1 >&2 ;;
     esac
   done
 }
