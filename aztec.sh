@@ -12,14 +12,22 @@ MIN_DOCKER_VERSION="20.10"
 MIN_COMPOSE_VERSION="1.29.2"
 AZTEC_CLI_URL="https://install.aztec.network"
 AZTEC_DIR="/root/aztec"
-DATA_DIR="/root/.aztec/alpha-testnet/data"
-AZTEC_IMAGE="aztecprotocol/aztec:2.0.4"
+DATA_DIR="/root/.aztec/alpha-testnet/data0"
+AZTEC_IMAGE="aztecprotocol/aztec:2.1.2"
 GOVERNANCE_PROPOSER_PAYLOAD="0xDCd9DdeAbEF70108cE02576df1eB333c4244C666"
 SNAPSHOT_URL_1="https://snapshots.aztec.graphops.xyz/files/"
 
 # 函数：打印信息
 print_info() {
-  echo "$1"
+  echo -e "\033[1;34m[INFO]\033[0m $1"
+}
+
+print_success() {
+  echo -e "\033[1;32m[SUCCESS]\033[0m $1"
+}
+
+print_error() {
+  echo -e "\033[1;31m[ERROR]\033[0m $1"
 }
 
 # 函数：检查命令是否存在
@@ -102,20 +110,22 @@ install_nodejs() {
   install_package nodejs
 }
 
-# 安装 Aztec CLI
-install_aztec_cli() {
+# 安装 Aztec CLI + Foundry
+install_aztec_cli_and_foundry() {
   print_info "安装 Aztec CLI..."
   if ! curl -sL "$AZTEC_CLI_URL" | bash; then
-    echo "Aztec CLI 安装失败。"
+    print_error "Aztec CLI 安装失败。"
     exit 1
   fi
   export PATH="$HOME/.aztec/bin:$PATH"
-  if ! check_command aztec-up; then
-    echo "Aztec CLI 安装失败。"
-    exit 1
-  fi
-  if ! aztec-up alpha-testnet 2.0.4; then
-    echo "aztec-up alpha-testnet 2.0.4 执行失败。"
+
+  print_info "安装 Foundry (cast)...
+  curl -L https://foundry.paradigm.xyz | bash
+  source /root/.bashrc
+  foundryup
+
+  if ! check_command cast; then
+    print_error "Foundry 安装失败。"
     exit 1
   fi
 }
@@ -125,7 +135,7 @@ validate_url() {
   local url=$1
   local name=$2
   if [[ ! "$url" =~ ^https?:// ]]; then
-    echo "错误：$name 格式无效。"
+    print_error "$name 格式无效。"
     exit 1
   fi
 }
@@ -135,7 +145,7 @@ validate_address() {
   local address=$1
   local name=$2
   if [[ ! "$address" =~ ^0x[a-fA-F0-9]{40}$ ]]; then
-    echo "错误：$name 格式无效。"
+    print_error "$name 格式无效。"
     exit 1
   fi
 }
@@ -145,266 +155,86 @@ validate_private_key() {
   local key=$1
   local name=$2
   if [[ ! "$key" =~ ^0x[a-fA-F0-9]{64}$ ]]; then
-    echo "错误：$name 格式无效。"
+    print_error "$name 格式无效。"
     exit 1
   fi
 }
 
-# 验证多个私钥格式
-validate_private_keys() {
-  local keys=$1
-  local name=$2
-  IFS=',' read -ra key_array <<< "$keys"
-  for key in "${key_array[@]}"; do
-    if [[ ! "$key" =~ ^0x[a-fA-F0-9]{64}$ ]]; then
-      echo "错误：$name 中包含无效私钥。"
-      exit 1
-    fi
-  done
+# 生成新的 Validator 密钥对（ETH + BLS）
+generate_validator_keys() {
+  print_info "生成新的 Validator 密钥对（ETH + BLS）..."
+
+  rm -rf "$HOME/.aztec/keystore"
+  mkdir -p "$HOME/.aztec/keystore"
+
+  aztec validator-keys new --fee-recipient "$COINBASE" > /dev/null 2>&1 || {
+    print_error "密钥生成失败！请检查 aztec CLI 是否正常。"
+    return 1
+  }
+
+  KEY_FILE="$HOME/.aztec/keystore/key1.json"
+  if [ ! -f "$KEY_FILE" ]; then
+    print_error "密钥文件未生成！"
+    return 1
+  fi
+
+  ETH_PRIVATE_KEY=$(jq -r '.eth' "$KEY_FILE")
+  BLS_PRIVATE_KEY=$(jq -r '.bls' "$KEY_FILE")
+  ETH_ATTESTER_ADDRESS=$(cast wallet address --private-key "$ETH_PRIVATE_KEY")
+
+  print_success "新密钥生成成功！"
+  echo "   Attester 地址: $ETH_ATTESTER_ADDRESS"
+  echo "   ETH 私钥: $ETH_PRIVATE_KEY"
+  echo "   BLS 私钥: $BLS_PRIVATE_KEY"
 }
 
-# 查看节点状态
-check_node_status() {
-  print_info "=== 节点状态检查 ==="
+# 执行 L1 Validator 注册
+register_l1_validator() {
+  print_info "开始 L1 Validator 注册..."
+
+  # Step 1: Approve 200k STAKE
+  print_info "Step 1: Approve 200k STAKE..."
+  cast send 0x139d2a7a0881e16332d7D1F8DB383A4507E1Ea7A \
+    "approve(address,uint256)" \
+    0xebd99ff0ff6677205509ae73f93d0ca52ac85d67 \
+    200000ether \
+    --private-key "$OLD_SEQUENCER_PRIVATE_KEY" \
+    --rpc-url "$ETH_RPC" && \
+  print_success "Approve 成功！" || {
+    print_error "Approve 失败！请检查私钥是否有 200k STAKE"
+    return 1
+  }
+
+  # Step 2: 注册 Validator
+  print_info "Step 2: 注册 L1 Validator..."
+  aztec add-l1-validator \
+    --l1-rpc-urls "$ETH_RPC" \
+    --network testnet \
+    --private-key "$OLD_SEQUENCER_PRIVATE_KEY" \
+    --attester "$ETH_ATTESTER_ADDRESS" \
+    --withdrawer "$COINBASE" \
+    --bls-secret-key "$BLS_PRIVATE_KEY" \
+    --rollup 0xebd99ff0ff6677205509ae73f93d0ca52ac85d67 && \
+  print_success "注册成功！" || {
+    print_error "注册失败！请检查参数或网络"
+    return 1
+  }
+
+  print_success "L1 注册完成！"
   echo
-
-  # 检查容器状态
-  if docker ps -q -f name=aztec-sequencer | grep -q .; then
-    CONTAINER_STATUS=$(docker inspect aztec-sequencer --format='{{.State.Status}}' 2>/dev/null || echo "unknown")
-    if [ "$CONTAINER_STATUS" = "running" ]; then
-      echo "✅ Aztec 容器: 运行中"
-      
-      # 检查端口状态
-      if docker port aztec-sequencer 8080 >/dev/null 2>&1; then
-        echo "✅ RPC 端口 (8080): 可用"
-      else
-        echo "⚠️  RPC 端口 (8080): 不可用"
-      fi
-
-      if docker port aztec-sequencer 40400 >/dev/null 2>&1; then
-        echo "✅ P2P 端口 (40400): 可用"
-      else
-        echo "⚠️  P2P 端口 (40400): 不可用"
-      fi
-
-      # 检查进程状态
-      if docker exec aztec-sequencer ps aux 2>/dev/null | grep -q "node"; then
-        echo "✅ Node.js 进程: 运行中"
-      else
-        echo "❌ Node.js 进程: 未运行"
-      fi
-
-      # 检查日志状态
-      LOGS_COUNT=$(docker logs --tail 5 aztec-sequencer 2>/dev/null | wc -l)
-      if [ "$LOGS_COUNT" -gt 0 ]; then
-        echo "✅ 日志输出: 正常"
-        
-        # 显示最近的同步状态
-        SYNC_STATUS=$(docker logs --tail 10 aztec-sequencer 2>/dev/null | grep -E "pending sync from L1|synced|block" | tail -1)
-        if [ -n "$SYNC_STATUS" ]; then
-          echo "📊 同步状态: $(echo "$SYNC_STATUS" | cut -c1-60)..."
-        fi
-      else
-        echo "❌ 日志输出: 无输出"
-      fi
-
-    else
-      echo "❌ Aztec 容器: $CONTAINER_STATUS"
-    fi
-  else
-    echo "❌ Aztec 容器: 未运行"
-  fi
-
+  print_info "请访问 https://dashtec.xyz 查询排队状态："
+  echo "   Attester 地址: $ETH_ATTESTER_ADDRESS"
   echo
-
-  # 检查配置文件
-  if [ -f "$AZTEC_DIR/.env" ]; then
-    echo "✅ 配置文件: 存在"
-    
-    # 检查 RPC 配置
-    if grep -q "ETHEREUM_HOSTS" "$AZTEC_DIR/.env"; then
-      ETH_RPC=$(grep "ETHEREUM_HOSTS" "$AZTEC_DIR/.env" | cut -d= -f2 | tr -d '"' | head -1)
-      echo "✅ 执行层 RPC: 已配置"
-      
-      # 处理多个执行层 RPC URL
-      IFS=',' read -ra ETH_RPC_ARRAY <<< "$ETH_RPC"
-      for i in "${!ETH_RPC_ARRAY[@]}"; do
-        RPC_URL=$(echo "${ETH_RPC_ARRAY[$i]}" | tr -d ' ')
-        echo "   📍 $((i+1)). $RPC_URL"
-        
-        # 测试执行层 RPC 连接
-        print_info "测试执行层 RPC $((i+1)) 连接..."
-        ETH_RPC_STATUS=$(timeout 10 curl -s -X POST -H "Content-Type: application/json" --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' "$RPC_URL" 2>/dev/null | grep -o '"result"' || echo "failed")
-        if [ "$ETH_RPC_STATUS" = '"result"' ]; then
-          echo "   ✅ 执行层 RPC $((i+1)): 连接正常"
-          
-          # 获取执行层最新区块
-          ETH_BLOCK_HEX=$(timeout 10 curl -s -X POST -H "Content-Type: application/json" --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' "$RPC_URL" 2>/dev/null | grep -o '"result":"[^"]*"' | cut -d'"' -f4)
-          if [ -n "$ETH_BLOCK_HEX" ]; then
-            ETH_BLOCK_DEC=$((16#${ETH_BLOCK_HEX#0x}))
-            echo "   📦 最新区块: $ETH_BLOCK_DEC"
-          fi
-        else
-          echo "   ❌ 执行层 RPC $((i+1)): 连接失败"
-        fi
-        echo
-      done
-    else
-      echo "❌ 执行层 RPC: 未配置"
-    fi
-
-    if grep -q "L1_CONSENSUS_HOST_URLS" "$AZTEC_DIR/.env"; then
-      CONS_RPC=$(grep "L1_CONSENSUS_HOST_URLS" "$AZTEC_DIR/.env" | cut -d= -f2 | tr -d '"' | head -1)
-      echo "✅ 共识层 RPC: 已配置"
-      
-      # 处理多个共识层 RPC URL
-      IFS=',' read -ra CONS_RPC_ARRAY <<< "$CONS_RPC"
-      CONS_RPC_SUCCESS=false
-      
-      for i in "${!CONS_RPC_ARRAY[@]}"; do
-        RPC_URL=$(echo "${CONS_RPC_ARRAY[$i]}" | tr -d ' ')
-        echo "   📍 $((i+1)). $RPC_URL"
-        
-        # 测试共识层 RPC 连接
-        print_info "测试共识层 RPC $((i+1)) 连接..."
-        
-        # 尝试不同的 Beacon API 端点
-        CONS_RPC_STATUS=$(timeout 10 curl -s -X GET "$RPC_URL/eth/v1/node/health" 2>/dev/null | head -1 | grep -o "200" || echo "failed")
-        
-        # 如果健康检查失败，尝试同步状态端点
-        if [ "$CONS_RPC_STATUS" != "200" ]; then
-          CONS_RPC_STATUS=$(timeout 10 curl -s -X GET "$RPC_URL/eth/v1/node/syncing" 2>/dev/null | head -1 | grep -o "200" || echo "failed")
-        fi
-        
-        # 如果还是失败，尝试 genesis 端点
-        if [ "$CONS_RPC_STATUS" != "200" ]; then
-          CONS_RPC_STATUS=$(timeout 10 curl -s -X GET "$RPC_URL/eth/v1/beacon/genesis" 2>/dev/null | head -1 | grep -o "200" || echo "failed")
-        fi
-        
-        if [ "$CONS_RPC_STATUS" = "200" ]; then
-          echo "   ✅ 共识层 RPC $((i+1)): 连接正常"
-          CONS_RPC_SUCCESS=true
-          
-          # 获取共识层同步状态
-          SYNC_RESPONSE=$(timeout 10 curl -s -X GET "$RPC_URL/eth/v1/node/syncing" 2>/dev/null)
-          if [ -n "$SYNC_RESPONSE" ]; then
-            SYNC_STATUS=$(echo "$SYNC_RESPONSE" | grep -o '"is_syncing":[^,]*' | cut -d':' -f2 | tr -d ' ' || echo "unknown")
-            if [ "$SYNC_STATUS" = "false" ]; then
-              echo "   📊 同步状态: 已同步"
-            elif [ "$SYNC_STATUS" = "true" ]; then
-              echo "   📊 同步状态: 同步中"
-            else
-              echo "   📊 同步状态: 未知"
-            fi
-          fi
-          
-          # 获取链ID信息
-          GENESIS_RESPONSE=$(timeout 10 curl -s -X GET "$RPC_URL/eth/v1/beacon/genesis" 2>/dev/null)
-          if [ -n "$GENESIS_RESPONSE" ]; then
-            CHAIN_ID=$(echo "$GENESIS_RESPONSE" | grep -o '"chain_id":"[^"]*"' | cut -d'"' -f4)
-            if [ -n "$CHAIN_ID" ]; then
-              echo "   🔗 链ID: $CHAIN_ID"
-            fi
-          fi
-        else
-          echo "   ❌ 共识层 RPC $((i+1)): 连接失败"
-        fi
-        echo
-      done
-      
-      # 总结共识层 RPC 状态
-      if [ "$CONS_RPC_SUCCESS" = true ]; then
-        echo "   ✅ 共识层 RPC: 至少有一个连接正常"
-      else
-        echo "   ❌ 共识层 RPC: 所有连接都失败"
-      fi
-    else
-      echo "❌ 共识层 RPC: 未配置"
-    fi
-
-    # 检查治理提案配置
-    if grep -q "GOVERNANCE_PROPOSER_PAYLOAD_ADDRESS" "$AZTEC_DIR/.env"; then
-      echo "✅ 治理提案: 已配置"
-    else
-      echo "⚠️  治理提案: 未配置"
-    fi
-  else
-    echo "❌ 配置文件: 不存在"
-  fi
-
-  echo
-
-  # 系统资源状态
-  echo "=== 系统资源 ==="
-  
-  # 内存使用
-  MEM_TOTAL=$(free -m 2>/dev/null | awk 'NR==2{print $2}' || echo "0")
-  if [ "$MEM_TOTAL" -gt 0 ]; then
-    MEM_USED=$(free -m | awk 'NR==2{print $3}')
-    MEM_PERCENT=$((MEM_USED * 100 / MEM_TOTAL))
-    echo "💾 内存使用: ${MEM_PERCENT}%"
-  else
-    echo "💾 内存使用: 无法获取"
-  fi
-
-  # 磁盘使用
-  DISK_USED=$(df -h / 2>/dev/null | awk 'NR==2{print $5}' || echo "0%")
-  echo "💿 磁盘使用: $DISK_USED"
-
-  # CPU 负载
-  if [ -f /proc/loadavg ]; then
-    LOAD_AVG=$(cat /proc/loadavg | awk '{print $1}')
-    echo "🖥️  CPU负载: $LOAD_AVG"
-  else
-    echo "🖥️  CPU负载: 无法获取"
-  fi
-
-  echo
-  echo "=== 网络连接 ==="
-  
-  # 检查网络连接
-  if ping -c 1 -W 3 google.com &>/dev/null; then
-    echo "🌐 互联网连接: 正常"
-  else
-    echo "🌐 互联网连接: 异常"
-  fi
-
-  # 检查 Docker 服务状态
-  if systemctl is-active --quiet docker; then
-    echo "🐳 Docker 服务: 运行中"
-  else
-    echo "🐳 Docker 服务: 未运行"
-  fi
-
-  echo
-  echo "=== 建议操作 ==="
-  if docker ps -q -f name=aztec-sequencer | grep -q .; then
-    echo "1. 查看详细日志 (选项 2)"
-    echo "2. 检查区块高度 (选项 3)"
-    if [ "$CONS_RPC_SUCCESS" = false ]; then
-      echo "3. ⚠️  共识层 RPC 连接失败，请检查网络或更换 RPC 服务商"
-    fi
-    echo "4. 如遇问题可重启节点"
-  else
-    echo "1. 安装并启动节点 (选项 1)"
-    echo "2. 检查配置文件"
-    if [ "$CONS_RPC_SUCCESS" = false ]; then
-      echo "3. ⚠️  确认共识层 RPC 服务可用性"
-    fi
-  fi
-
-  echo
-  echo "按任意键返回主菜单..."
-  read -n 1
+  print_info "建议给新地址转 0.1+ Sepolia ETH 用于 gas："
+  echo "   cast send $ETH_ATTESTER_ADDRESS --value 0.1ether --private-key YOUR_FAUCET_KEY --rpc-url $ETH_RPC"
 }
 
-# 主逻辑：安装和启动 Aztec 节点
+# 安装并启动节点
 install_and_start_node() {
-  # 清理旧配置和数据
-  print_info "清理旧的配置和数据..."
-  rm -rf "$AZTEC_DIR/.env" "$AZTEC_DIR/docker-compose.yml"
-  rm -rf /tmp/aztec-world-state-*
-  rm -rf "$DATA_DIR"
+  print_info "开始安装 Aztec 2.1.2 节点..."
+
+  # 清理旧数据
+  rm -rf "$AZTEC_DIR" "$DATA_DIR" /tmp/aztec-world-state-*
   docker stop aztec-sequencer 2>/dev/null || true
   docker rm aztec-sequencer 2>/dev/null || true
 
@@ -412,494 +242,128 @@ install_and_start_node() {
   install_docker
   install_docker_compose
   install_nodejs
-  install_aztec_cli
+  install_aztec_cli_and_foundry
 
-  # 创建配置目录
-  print_info "创建配置目录 $AZTEC_DIR..."
-  mkdir -p "$AZTEC_DIR"
-  chmod -R 755 "$AZTEC_DIR"
+  # 创建目录
+  mkdir -p "$AZTEC_DIR" "$DATA_DIR"
+  chmod -R 755 "$AZTEC_DIR" "$DATA_DIR"
 
   # 配置防火墙
-  print_info "配置防火墙..."
-  ufw allow 40400/tcp >/dev/null 2>&1
-  ufw allow 40400/udp >/dev/null 2>&1
-  ufw allow 8080/tcp >/dev/null 2>&1
+  ufw allow 40400/tcp >/dev/null 2>&1 || true
+  ufw allow 40400/udp >/dev/null 2>&1 || true
+  ufw allow 8080/tcp >/dev/null 2>&1 || true
 
   # 获取用户输入
-  ETH_RPC="${ETH_RPC:-}"
-  CONS_RPC="${CONS_RPC:-}"
-  VALIDATOR_PRIVATE_KEYS="${VALIDATOR_PRIVATE_KEYS:-}"
-  COINBASE="${COINBASE:-}"
-  PUBLISHER_PRIVATE_KEY="${PUBLISHER_PRIVATE_KEY:-}"
+  clear
+  print_info "请输入以下信息（2.1.2 注册所需）："
+  read -p "L1 执行 RPC (Alchemy/Infura): " ETH_RPC
+  read -p "L1 共识 Beacon RPC: " CONS_RPC
+  read -p "旧 Sequencer 私钥 (有 200k STAKE): " OLD_SEQUENCER_PRIVATE_KEY
+  read -p "COINBASE 地址 (奖励接收): " COINBASE
 
-  print_info "配置说明："
-  print_info "  - L1 执行客户端 RPC URL (如 Alchemy 的 Sepolia RPC)"
-  print_info "  - L1 共识 RPC URL (如 drpc.org 的 Beacon Chain Sepolia RPC)" 
-  print_info "  - 验证者私钥 (多个用逗号分隔)"
-  print_info "  - COINBASE 地址"
-  print_info "  - 发布者私钥 (可选)"
+  validate_url "$ETH_RPC" "执行 RPC"
+  validate_url "$CONS_RPC" "共识 RPC"
+  validate_private_key "$OLD_SEQUENCER_PRIVATE_KEY" "旧私钥"
+  validate_address "$COINBASE" "COINBASE"
 
-  if [ -z "$ETH_RPC" ]; then
-    read -p "L1 执行客户端 RPC URL: " ETH_RPC
-  fi
-  if [ -z "$CONS_RPC" ]; then
-    read -p "L1 共识 RPC URL: " CONS_RPC
-  fi
-  if [ -z "$VALIDATOR_PRIVATE_KEYS" ]; then
-    read -p "验证者私钥: " VALIDATOR_PRIVATE_KEYS
-  fi
-  if [ -z "$COINBASE" ]; then
-    read -p "COINBASE 地址: " COINBASE
-  fi
-  read -p "发布者私钥 (可选): " PUBLISHER_PRIVATE_KEY
-  
-  # 验证输入
-  validate_url "$ETH_RPC" "L1 执行客户端 RPC URL"
-  validate_url "$CONS_RPC" "L1 共识 RPC URL"
-  if [ -z "$VALIDATOR_PRIVATE_KEYS" ]; then
-    echo "错误：验证者私钥不能为空。"
-    exit 1
-  fi
-  validate_private_keys "$VALIDATOR_PRIVATE_KEYS" "验证者私钥"
-  validate_address "$COINBASE" "COINBASE 地址"
-  if [ -n "$PUBLISHER_PRIVATE_KEY" ]; then
-    validate_private_key "$PUBLISHER_PRIVATE_KEY" "发布者私钥"
-  fi
+  # 生成新密钥 + 注册
+  generate_validator_keys
+  register_l1_validator
 
-  # 获取公共 IP
-  print_info "获取公共 IP..."
+  # 获取公网 IP
   PUBLIC_IP=$(curl -s ifconfig.me || echo "127.0.0.1")
-  print_info "IP: $PUBLIC_IP"
+  print_info "公网 IP: $PUBLIC_IP"
 
-  # 生成 .env 文件
-  print_info "生成配置文件..."
+  # 生成 .env
   cat > "$AZTEC_DIR/.env" <<EOF
-ETHEREUM_HOSTS="$ETH_RPC"
-L1_CONSENSUS_HOST_URLS="$CONS_RPC"
-P2P_IP="$PUBLIC_IP"
-VALIDATOR_PRIVATE_KEYS="$VALIDATOR_PRIVATE_KEYS"
-COINBASE="$COINBASE"
-DATA_DIRECTORY="/data"
-LOG_LEVEL="debug"
+ETHEREUM_RPC_URL=$ETH_RPC
+CONSENSUS_BEACON_URL=$CONS_RPC
+P2P_IP=$PUBLIC_IP
+VALIDATOR_PRIVATE_KEYS=$OLD_SEQUENCER_PRIVATE_KEY
+COINBASE=$COINBASE
+GOVERNANCE_PROPOSER_PAYLOAD_ADDRESS=$GOVERNANCE_PROPOSER_PAYLOAD
 EOF
 
-  if [ -n "$PUBLISHER_PRIVATE_KEY" ]; then
-    echo "PUBLISHER_PRIVATE_KEY=\"$PUBLISHER_PRIVATE_KEY\"" >> "$AZTEC_DIR/.env"
-  fi
-
-  # 设置启动标志
-  VALIDATOR_FLAG="--sequencer.validatorPrivateKeys \$VALIDATOR_PRIVATE_KEYS"
-  PUBLISHER_FLAG=""
-  if [ -n "$PUBLISHER_PRIVATE_KEY" ]; then
-    PUBLISHER_FLAG="--sequencer.publisherPrivateKeys \$PUBLISHER_PRIVATE_KEY"
-  fi
-
-  # 生成 docker-compose.yml 文件
+  # 生成 docker-compose.yml（社区最新版）
   cat > "$AZTEC_DIR/docker-compose.yml" <<EOF
 services:
-  aztec-sequencer:
+  aztec-node:
     container_name: aztec-sequencer
-    network_mode: host
     image: $AZTEC_IMAGE
     restart: unless-stopped
+    network_mode: host
     environment:
-      - ETHEREUM_HOSTS=\${ETHEREUM_HOSTS}
-      - L1_CONSENSUS_HOST_URLS=\${L1_CONSENSUS_HOST_URLS}
-      - P2P_IP=\${P2P_IP}
-      - VALIDATOR_PRIVATE_KEYS=\${VALIDATOR_PRIVATE_KEYS}
-      - COINBASE=\${COINBASE}
-      - DATA_DIRECTORY=\${DATA_DIRECTORY}
-      - LOG_LEVEL=\${LOG_LEVEL}
-      - PUBLISHER_PRIVATE_KEY=\${PUBLISHER_PRIVATE_KEY:-}
+      ETHEREUM_HOSTS: \${ETHEREUM_RPC_URL}
+      L1_CONSENSUS_HOST_URLS: \${CONSENSUS_BEACON_URL}
+      DATA_DIRECTORY: /data
+      VALIDATOR_PRIVATE_KEYS: \${VALIDATOR_PRIVATE_KEYS}
+      COINBASE: \${COINBASE}
+      P2P_IP: \${P2P_IP}
+      GOVERNANCE_PROPOSER_PAYLOAD_ADDRESS: \${GOVERNANCE_PROPOSER_PAYLOAD_ADDRESS}
+      LOG_LEVEL: info
+      LOG_FORMAT: json
+      LOG_FILTER: warn,error
+      LMDB_MAX_READERS: 32
+    mem_limit: 4G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+        compress: "true"
     entrypoint: >
-      sh -c "node --no-warnings /usr/src/yarn-project/aztec/dest/bin/index.js start --network alpha-testnet --node --archiver --sequencer --snapshots-url $SNAPSHOT_URL_1 $VALIDATOR_FLAG $PUBLISHER_FLAG"
+      sh -c 'node --no-warnings /usr/src/yarn-project/aztec/dest/bin/index.js start 
+      --network testnet --node --archiver --sequencer'
     volumes:
-      - /root/.aztec/alpha-testnet/data/:/data
+      - $DATA_DIR:/data
 EOF
 
-  # 创建数据目录
-  mkdir -p "$DATA_DIR"
-  chmod -R 755 "$DATA_DIR"
-
   # 启动节点
-  print_info "启动 Aztec 节点..."
   cd "$AZTEC_DIR"
-  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-    if ! docker compose up -d; then
-      echo "启动失败。"
-      exit 1
-    fi
-  elif command -v docker-compose >/dev/null 2>&1; then
-    if ! docker-compose up -d; then
-      echo "启动失败。"
-      exit 1
-    fi
-  else
-    echo "未找到 docker compose。"
-    exit 1
-  fi
+  print_info "启动节点..."
+  docker compose up -d
 
-  print_info "安装完成！"
+  print_success "Aztec 2.1.2 节点部署完成！"
+  echo
   print_info "查看日志: docker logs -f aztec-sequencer"
+  print_info "查排队: https://dashtec.xyz → 输入 $ETH_ATTESTER_ADDRESS"
   print_info "配置目录: $AZTEC_DIR"
 }
 
 # 查看节点日志
 view_logs() {
-  if [ -f "$AZTEC_DIR/docker-compose.yml" ]; then
-    print_info "查看节点日志..."
-    docker logs -f --tail 100 aztec-sequencer
-  else
-    print_info "未找到节点配置。"
-  fi
+  docker logs -f --tail 100 aztec-sequencer 2>/dev/null || echo "节点未运行"
 }
 
-# 获取区块高度和同步证明
-get_block_and_proof() {
-  if ! check_command jq; then
-    print_info "安装 jq..."
-    update_apt
-    install_package jq
-  fi
-
-  if [ -f "$AZTEC_DIR/docker-compose.yml" ]; then
-    if ! docker ps -q -f name=aztec-sequencer | grep -q .; then
-      print_info "节点未运行。"
-      return
-    fi
-
-    print_info "获取区块高度..."
-    BLOCK_NUMBER=$(curl -s -X POST -H 'Content-Type: application/json' \
-      -d '{"jsonrpc":"2.0","method":"node_getL2Tips","params":[],"id":67}' \
-      http://localhost:8080 | jq -r ".result.proven.number" || echo "")
-
-    if [ -z "$BLOCK_NUMBER" ] || [ "$BLOCK_NUMBER" = "null" ]; then
-      print_info "无法获取区块高度。"
-      return
-    fi
-
-    print_info "当前区块高度: $BLOCK_NUMBER"
-    print_info "获取同步证明..."
-    PROOF=$(curl -s -X POST -H 'Content-Type: application/json' \
-      -d "$(jq -n --arg bn "$BLOCK_NUMBER" '{"jsonrpc":"2.0","method":"node_getArchiveSiblingPath","params":[$bn,$bn],"id":67}')" \
-      http://localhost:8080 | jq -r ".result" || echo "")
-
-    if [ -z "$PROOF" ] || [ "$PROOF" = "null" ]; then
-      print_info "无法获取同步证明。"
-    else
-      print_info "同步证明: $PROOF"
-    fi
-  else
-    print_info "未找到节点配置。"
-  fi
-}
-
-# 停止和更新节点
-stop_and_update_node() {
-  print_info "停止和更新节点..."
-
-  if [ ! -f "$AZTEC_DIR/docker-compose.yml" ]; then
-    print_info "未找到节点配置。"
-    return
-  fi
-
-  read -p "确认操作？(y/n): " confirm
-  if [[ "$confirm" != "y" ]]; then
-    return
-  fi
-
-  # 停止并删除容器
-  if docker ps -q -f name=aztec-sequencer | grep -q .; then
-    docker stop aztec-sequencer
-    docker rm aztec-sequencer
-  fi
-
-  # 更新 Aztec CLI
-  export PATH="$HOME/.aztec/bin:$PATH"
-  aztec-up alpha-testnet 2.0.4
-
-  # 拉取最新镜像
-  docker pull "$AZTEC_IMAGE"
-
-  # 重新启动
-  cd "$AZTEC_DIR"
-  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-    docker compose up -d
-  else
-    docker-compose up -d
-  fi
-
-  print_info "更新完成！"
-}
-
-# 删除节点数据
-delete_node_data() {
-  print_info "删除节点数据..."
-
-  read -p "确认删除？(y/n): " confirm
-  if [[ "$confirm" != "y" ]]; then
-    return
-  fi
-
-  # 停止并删除容器
-  if docker ps -q -f name=aztec-sequencer | grep -q .; then
-    docker stop aztec-sequencer
-    docker rm aztec-sequencer
-  fi
-
-  # 删除镜像
-  if docker images -q "aztecprotocol/aztec" | grep -q .; then
-    docker rmi $(docker images -q "aztecprotocol/aztec")
-  fi
-
-  # 删除配置和数据
-  rm -rf "$AZTEC_DIR"
-  rm -rf "$DATA_DIR"
-  rm -rf /tmp/aztec-world-state-*
-  rm -rf "$HOME/.aztec"
-
-  print_info "删除完成！"
-}
-
-# 设置治理提案投票
-set_governance_vote() {
-  print_info "设置治理提案投票..."
-
-  if [ ! -f "$AZTEC_DIR/.env" ]; then
-    print_info "未找到节点配置。"
-    return
-  fi
-
-  read -p "确认设置？(y/n): " confirm
-  if [[ "$confirm" != "y" ]]; then
-    return
-  fi
-
-  if grep -q "GOVERNANCE_PROPOSER_PAYLOAD_ADDRESS" "$AZTEC_DIR/.env"; then
-    sed -i "s|GOVERNANCE_PROPOSER_PAYLOAD_ADDRESS=.*|GOVERNANCE_PROPOSER_PAYLOAD_ADDRESS=\"$GOVERNANCE_PROPOSER_PAYLOAD\"|" "$AZTEC_DIR/.env"
-  else
-    echo "GOVERNANCE_PROPOSER_PAYLOAD_ADDRESS=\"$GOVERNANCE_PROPOSER_PAYLOAD\"" >> "$AZTEC_DIR/.env"
-  fi
-
-  print_info "治理提案已设置！"
-  
-  read -p "是否重启节点？(y/n): " restart_confirm
-  if [[ "$restart_confirm" == "y" ]]; then
-    cd "$AZTEC_DIR"
-    docker compose restart
-    print_info "节点已重启。"
-  fi
-}
-
-# 修复快照同步问题
-fix_snapshot_sync() {
-  print_info "修复快照同步问题..."
-
-  if [ ! -f "$AZTEC_DIR/docker-compose.yml" ]; then
-    print_info "未找到节点配置。"
-    return
-  fi
-
-  read -p "确认修复？(y/n): " confirm
-  if [[ "$confirm" != "y" ]]; then
-    return
-  fi
-
-  cd "$AZTEC_DIR"
-  docker compose down
-
-  # 更新快照 URL
-  if grep -q "snapshots-url" "$AZTEC_DIR/docker-compose.yml"; then
-    sed -i "s|--snapshots-url [^ ]*|--snapshots-url $SNAPSHOT_URL_1|" "$AZTEC_DIR/docker-compose.yml"
-  else
-    sed -i "s|--sequencer|--sequencer --snapshots-url $SNAPSHOT_URL_1|" "$AZTEC_DIR/docker-compose.yml"
-  fi
-
-  docker compose up -d
-  print_info "修复完成！"
-}
-
-# 备份节点配置
-backup_node_config() {
-  print_info "备份节点配置..."
-  
-  local backup_dir="/root/aztec_backup_$(date +%Y%m%d_%H%M%S)"
-  mkdir -p "$backup_dir"
-  
-  if [ -f "$AZTEC_DIR/.env" ]; then
-    cp "$AZTEC_DIR/.env" "$backup_dir/"
-    print_info "配置文件已备份到: $backup_dir/.env"
-  fi
-  
-  if [ -f "$AZTEC_DIR/docker-compose.yml" ]; then
-    cp "$AZTEC_DIR/docker-compose.yml" "$backup_dir/"
-    print_info "Docker配置已备份到: $backup_dir/docker-compose.yml"
-  fi
-  
-  print_info "备份完成！备份目录: $backup_dir"
-}
-
-# 恢复节点配置
-restore_node_config() {
-  print_info "恢复节点配置..."
-  
-  local backup_dir="/root/aztec_backup_$(date +%Y%m%d_%H%M%S)"
-  
-  # 查找最新的备份目录
-  local latest_backup=$(ls -dt /root/aztec_backup_* 2>/dev/null | head -1)
-  
-  if [ -z "$latest_backup" ]; then
-    print_info "未找到备份文件。"
-    return
-  fi
-  
-  print_info "找到备份: $latest_backup"
-  read -p "确认恢复？(y/n): " confirm
-  if [[ "$confirm" != "y" ]]; then
-    return
-  fi
-  
-  if [ -f "$latest_backup/.env" ]; then
-    cp "$latest_backup/.env" "$AZTEC_DIR/"
-    print_info "配置文件已恢复。"
-  fi
-  
-  if [ -f "$latest_backup/docker-compose.yml" ]; then
-    cp "$latest_backup/docker-compose.yml" "$AZTEC_DIR/"
-    print_info "Docker配置已恢复。"
-  fi
-  
-  print_info "配置恢复完成！"
-  
-  read -p "是否重启节点？(y/n): " restart_confirm
-  if [[ "$restart_confirm" == "y" ]]; then
-    cd "$AZTEC_DIR"
-    docker compose restart
-    print_info "节点已重启。"
-  fi
-}
-
-# 检查系统要求
-check_system_requirements() {
-  print_info "=== 系统要求检查 ==="
-  
-  # 检查内存
-  local total_mem=$(free -g | awk 'NR==2{print $2}')
-  if [ "$total_mem" -lt 8 ]; then
-    echo "⚠️  内存: ${total_mem}GB (推荐 16GB)"
-  else
-    echo "✅ 内存: ${total_mem}GB"
-  fi
-  
-  # 检查磁盘空间
-  local disk_space=$(df -h / | awk 'NR==2{print $4}')
-  local disk_avail=$(df -BG / | awk 'NR==2{print $4}' | sed 's/G//')
-  if [ "$disk_avail" -lt 100 ]; then
-    echo "⚠️  磁盘空间: ${disk_space} (推荐 200GB+)"
-  else
-    echo "✅ 磁盘空间: ${disk_space}"
-  fi
-  
-  # 检查 CPU 核心数
-  local cpu_cores=$(nproc)
-  if [ "$cpu_cores" -lt 4 ]; then
-    echo "⚠️  CPU核心: ${cpu_cores} (推荐 8核)"
-  else
-    echo "✅ CPU核心: ${cpu_cores}"
-  fi
-  
-  # 检查操作系统
-  if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    echo "✅ 操作系统: $NAME $VERSION"
-  else
-    echo "⚠️  操作系统: 未知"
-  fi
-  
+# 查看节点状态
+check_node_status() {
+  print_info "节点状态检查..."
+  docker ps -a --filter "name=aztec-sequencer"
   echo
-  echo "按任意键继续..."
-  read -n 1
+  print_info "最新日志："
+  docker logs --tail 10 aztec-sequencer 2>/dev/null || echo "无日志"
 }
 
-# 主菜单函数
+# 主菜单
 main_menu() {
   while true; do
     clear
-    echo "Aztec 节点管理脚本"
-    echo "========================"
-    echo "1. 安装并启动 Aztec 节点"
+    echo "=================================="
+    echo "   Aztec 2.1.2 节点管理脚本"
+    echo "=================================="
+    echo "1. 安装并启动节点（自动注册）"
     echo "2. 查看节点日志"
-    echo "3. 获取区块高度和同步证明"
-    echo "4. 查看节点状态"
-    echo "5. 停止和更新节点"
-    echo "6. 删除节点数据"
-    echo "7. 设置治理提案投票"
-    echo "8. 修复快照同步问题"
-    echo "9. 备份节点配置"
-    echo "10. 恢复节点配置"
-    echo "11. 检查系统要求"
-    echo "12. 退出"
-    read -p "请输入选项 (1-12): " choice
+    echo "3. 查看节点状态"
+    echo "4. 退出"
+    echo "=================================="
+    read -p "请选择 (1-4): " choice
 
     case $choice in
-      1)
-        install_and_start_node
-        echo "按任意键继续..."
-        read -n 1
-        ;;
-      2)
-        view_logs
-        ;;
-      3)
-        get_block_and_proof
-        echo "按任意键继续..."
-        read -n 1
-        ;;
-      4)
-        check_node_status
-        ;;
-      5)
-        stop_and_update_node
-        echo "按任意键继续..."
-        read -n 1
-        ;;
-      6)
-        delete_node_data
-        echo "按任意键继续..."
-        read -n 1
-        ;;
-      7)
-        set_governance_vote
-        echo "按任意键继续..."
-        read -n 1
-        ;;
-      8)
-        fix_snapshot_sync
-        echo "按任意键继续..."
-        read -n 1
-        ;;
-      9)
-        backup_node_config
-        echo "按任意键继续..."
-        read -n 1
-        ;;
-      10)
-        restore_node_config
-        echo "按任意键继续..."
-        read -n 1
-        ;;
-      11)
-        check_system_requirements
-        ;;
-      12)
-        print_info "退出脚本。"
-        exit 0
-        ;;
-      *)
-        print_info "无效选项。"
-        echo "按任意键继续..."
-        read -n 1
-        ;;
+      1) install_and_start_node; read -n 1 ;;
+      2) view_logs ;;
+      3) check_node_status; read -n 1 ;;
+      4) exit 0 ;;
+      *) echo "无效选项"; read -n 1 ;;
     esac
   done
 }
