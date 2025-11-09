@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+
 set -euo pipefail
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -27,23 +28,19 @@ print_warning() { echo -e "\033[1;33m[WARNING]\033[0m $1"; }
 # ==================== 环境检查 ====================
 check_environment() {
   print_info "检查环境..."
-  
   # 确保 PATH 正确
   export PATH="$HOME/.foundry/bin:$PATH"
   export PATH="$HOME/.aztec/bin:$PATH"
-  
   local missing=()
   for cmd in docker jq cast aztec; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       missing+=("$cmd")
     fi
   done
-  
   if [ ${#missing[@]} -gt 0 ]; then
     print_error "缺少命令: ${missing[*]}"
     return 1
   fi
-  
   print_success "环境检查通过"
   return 0
 }
@@ -54,7 +51,6 @@ generate_address_from_private_key() {
   # 使用更安全的方式生成地址
   local address
   address=$(cast wallet address --private-key "$private_key" 2>/dev/null || echo "")
-  
   if [[ -z "$address" || ! "$address" =~ ^0x[a-fA-F0-9]{40}$ ]]; then
     # 如果 cast 失败，尝试手动计算
     local stripped_key="${private_key#0x}"
@@ -63,7 +59,6 @@ generate_address_from_private_key() {
       address=$(echo -n "$stripped_key" | xxd -r -p | openssl pkey -inform DER -outform DER 2>/dev/null | tail -c 65 | keccak-256 2>/dev/null | tail -c 41 | sed 's/^/0x/' || echo "")
     fi
   fi
-  
   echo "$address"
 }
 
@@ -72,7 +67,7 @@ install_and_start_node() {
   clear
   print_info "Aztec 2.1.2 测试网节点安装"
   echo "=========================================="
-  
+
   # 环境检查
   if ! check_environment; then
     echo "请先安装依赖"
@@ -84,10 +79,8 @@ install_and_start_node() {
   echo "请输入以下信息："
   read -p "L1 执行 RPC URL (Sepolia): " ETH_RPC
   echo "您输入的 RPC: $ETH_RPC"
-  
   read -p "L1 共识 Beacon RPC URL: " CONS_RPC
   echo "您输入的 Beacon RPC: $CONS_RPC"
-  
   read -p "旧验证者私钥 (有 200k STAKE): " OLD_PRIVATE_KEY
   echo "您输入的私钥: $OLD_PRIVATE_KEY"
   echo ""
@@ -112,45 +105,52 @@ install_and_start_node() {
   # 生成新密钥
   print_info "生成新的验证者密钥..."
   rm -rf "$HOME/.aztec/keystore" 2>/dev/null || true
-  
   if ! aztec validator-keys new --fee-recipient 0x0000000000000000000000000000000000000000000000000000000000000000; then
     print_error "BLS 密钥生成失败"
     read -p "按任意键继续..."
     return 1
   fi
-
   if [ ! -f "$KEYSTORE_FILE" ]; then
     print_error "密钥文件未生成"
     read -p "按任意键继续..."
     return 1
   fi
 
-  # 读取密钥 - 使用更安全的方式
+  # 读取密钥 - 使用正确的 JSON 路径
   local new_eth_key new_bls_key new_address
-  
-  # 直接从文件读取，不进行额外处理
-  new_eth_key=$(jq -r '.eth' "$KEYSTORE_FILE")
-  new_bls_key=$(jq -r '.bls' "$KEYSTORE_FILE")
-  
+  new_eth_key=$(jq -r '.validators[0].attester.eth' "$KEYSTORE_FILE")
+  new_bls_key=$(jq -r '.validators[0].attester.bls' "$KEYSTORE_FILE")
+
+  # 添加错误检查
+  if [[ -z "$new_eth_key" || "$new_eth_key" == "null" ]]; then
+    print_error "ETH 私钥读取失败，检查 JSON 结构"
+    cat "$KEYSTORE_FILE"  # 打印文件内容用于调试
+    read -p "按任意键继续..."
+    return 1
+  fi
+  if [[ -z "$new_bls_key" || "$new_bls_key" == "null" ]]; then
+    print_error "BLS 私钥读取失败"
+    read -p "按任意键继续..."
+    return 1
+  fi
+
   # 生成新地址
   new_address=$(generate_address_from_private_key "$new_eth_key")
-  
   if [[ -z "$new_address" || ! "$new_address" =~ ^0x[a-fA-F0-9]{40}$ ]]; then
     print_error "新地址生成失败"
     echo "ETH 私钥: $new_eth_key"
     read -p "按任意键继续..."
     return 1
   fi
-
   print_success "新验证者地址: $new_address"
 
   # 显示密钥信息
   echo ""
   print_warning "=== 请立即保存以下密钥信息！ ==="
   echo "=========================================="
-  echo "🔑 新的以太坊私钥: $new_eth_key"
-  echo "🔐 新的 BLS 私钥: $new_bls_key"  
-  echo "📍 新的公钥地址: $new_address"
+  echo " 新的以太坊私钥: $new_eth_key"
+  echo " 新的 BLS 私钥: $new_bls_key"
+  echo " 新的公钥地址: $new_address"
   echo "=========================================="
   read -p "确认已保存所有密钥信息后按 [Enter] 继续..."
 
@@ -161,7 +161,7 @@ install_and_start_node() {
     --private-key "$OLD_PRIVATE_KEY" --rpc-url "$ETH_RPC"; then
     print_error "STAKE 授权失败！请检查："
     echo "1. 私钥是否正确"
-    echo "2. 地址是否有 200k STAKE" 
+    echo "2. 地址是否有 200k STAKE"
     echo "3. RPC 是否可用"
     read -p "按任意键继续..."
     return 1
@@ -199,7 +199,6 @@ install_and_start_node() {
   print_info "设置节点环境..."
   mkdir -p "$AZTEC_DIR" "$DATA_DIR" "$KEY_DIR"
   cp "$KEYSTORE_FILE" "$KEY_DIR/keystore.json"
-  
   local public_ip
   public_ip=$(curl -s ipv4.icanhazip.com || echo "127.0.0.1")
 
@@ -251,7 +250,6 @@ services:
     networks:
       - aztec
     restart: always
-
 networks:
   aztec:
     name: aztec
@@ -270,17 +268,16 @@ EOF
 
   # 完成信息
   echo ""
-  print_success "🎉 Aztec 2.1.2 节点部署完成！"
+  print_success " Aztec 2.1.2 节点部署完成！"
   echo ""
   print_info "=== 重要信息汇总 ==="
-  echo "📍 新验证者地址: $new_address"
-  echo "📊 排队查询: $DASHTEC_URL/validator/$new_address"
-  echo "📝 查看日志: docker logs -f aztec-sequencer"
-  echo "🔄 查看状态: curl http://localhost:8080/status"
-  echo "📁 数据目录: $AZTEC_DIR"
+  echo " 新验证者地址: $new_address"
+  echo " 排队查询: $DASHTEC_URL/validator/$new_address"
+  echo " 查看日志: docker logs -f aztec-sequencer"
+  echo " 查看状态: curl http://localhost:8080/status"
+  echo " 数据目录: $AZTEC_DIR"
   echo ""
   print_warning "请确保已妥善保存所有密钥信息！"
-  
   read -p "按任意键继续..."
 }
 
@@ -292,31 +289,31 @@ main_menu() {
     echo "     Aztec 2.1.2 测试网节点安装"
     echo "========================================"
     echo "1. 安装节点 (自动注册)"
-    echo "2. 查看节点日志" 
+    echo "2. 查看节点日志"
     echo "3. 检查节点状态"
     echo "4. 退出"
     echo "========================================"
     read -p "请选择 (1-4): " choice
     case $choice in
       1) install_and_start_node ;;
-      2) 
+      2)
         echo "查看节点日志 (Ctrl+C 退出)..."
         docker logs -f aztec-sequencer 2>/dev/null || echo "节点未运行"
         read -p "按任意键继续..."
         ;;
-      3) 
+      3)
         if docker ps | grep -q aztec-sequencer; then
-          echo "✅ 节点状态: 运行中"
+          echo " 节点状态: 运行中"
           echo ""
           echo "最近日志:"
           docker logs --tail 10 aztec-sequencer 2>/dev/null | tail -10
         else
-          echo "❌ 节点状态: 未运行"
+          echo " 节点状态: 未运行"
         fi
         read -p "按任意键继续..."
         ;;
       4) exit 0 ;;
-      *) 
+      *)
         echo "无效选项"
         read -p "按任意键继续..."
         ;;
