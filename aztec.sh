@@ -150,6 +150,117 @@ check_eth_balance() {
   fi
 }
 
+# ==================== 更新并重启节点 ====================
+update_and_restart_node() {
+  if [ ! -d "$AZTEC_DIR" ]; then
+    print_error "节点目录不存在，请先安装节点！"
+    read -p "按 [Enter] 继续..."
+    return 1
+  fi
+
+  print_info "检查并拉取最新 Aztec 镜像..."
+  cd "$AZTEC_DIR"
+  local old_image=$(docker inspect aztec-sequencer --format '{{.Config.Image}}' 2>/dev/null || echo "未知")
+  print_info "当前镜像: $old_image"
+
+  docker compose pull aztec-sequencer
+  print_success "镜像拉取完成！"
+
+  print_warning "重启节点（可能有短暂中断）..."
+  docker compose up -d
+  sleep 10  # 等待重启
+
+  local new_image=$(docker inspect aztec-sequencer --format '{{.Config.Image}}' 2>/dev/null || echo "未知")
+  if [[ "$old_image" != "$new_image" ]]; then
+    print_success "更新成功！新镜像: $new_image"
+  else
+    print_info "无新版本可用。"
+  fi
+
+  print_info "重启后日志（最近20行）："
+  docker logs aztec-sequencer --tail 20
+
+  echo ""
+  print_success "更新和重启完成！"
+  read -p "按 [Enter] 继续..."
+}
+
+# ==================== 查看日志和状态 ====================
+view_logs_and_status() {
+  if docker ps | grep -q aztec-sequencer; then
+    echo "节点运行中"
+    docker logs --tail 100 aztec-sequencer
+    echo ""
+    local api_status=$(curl -s http://localhost:8080/status 2>/dev/null || echo "")
+    if [[ -n "$api_status" && $(echo "$api_status" | jq -e '.error == null' 2>/dev/null) == "true" ]]; then
+      echo "$api_status"
+      print_success "API 响应正常！"
+    else
+      echo "$api_status"
+      print_error "API 响应异常或无响应！"
+    fi
+
+    # 更精确的日志错误检测：针对Aztec常见问题，如连接失败、同步错误、P2P问题
+    # 排除正常日志（如"no blocks"、"too far into slot"、"rate limit"）
+    local error_logs=$(docker logs --tail 100 aztec-sequencer 2>/dev/null | grep -E "(ERROR|WARN|FATAL|failed to|connection refused|timeout|sync failed|RPC error|P2P error|disconnected.*failed)" | grep -v -E "(no blocks|too far into slot|rate limit exceeded|yamux error)")
+    local error_count=$(echo "$error_logs" | wc -l)
+    if [[ "$error_count" -eq 0 ]]; then
+      print_success "日志正常，无明显错误！（P2P活跃，同步稳定）"
+    else
+      print_warning "日志中发现 $error_count 条潜在问题 (如连接/同步失败)，详情："
+      echo "$error_logs"
+    fi
+
+    echo ""
+    print_info "是否查看实时日志？(y/N): "
+    read -r realtime_choice
+    if [[ "$realtime_choice" == "y" || "$realtime_choice" == "Y" ]]; then
+      print_info "实时日志（按 Ctrl+C 停止）..."
+      docker logs -f aztec-sequencer
+    fi
+  else
+    print_error "节点未运行！"
+  fi
+  read -p "按 [Enter] 继续..."
+}
+
+# ==================== 性能监控 ====================
+monitor_performance() {
+  if [ ! -d "$AZTEC_DIR" ]; then
+    print_error "节点目录不存在，请先安装节点！"
+    read -p "按 [Enter] 继续..."
+    return 1
+  fi
+
+  print_info "=== 系统性能监控 ==="
+  echo "VPS 整体资源："
+  free -h | grep -E "^Mem:" | awk '{printf "内存: 总 %s | 已用 %s | 可用 %s (%.1f%% 已用)\n", $2, $3, $7, ($3/$2)*100}'
+  echo "CPU 使用率: $(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 | awk '{printf "%.1f%%\n", $1}')"
+  echo "磁盘使用: $(df -h / | awk 'NR==2 {printf "%.1f%% 已用 (%s 可用)", $5, $4}')"
+  echo "网络 I/O (最近1min): $(cat /proc/net/dev | grep eth0 | awk '{print "接收: " $2/1024/1024 "MB, 发送: " $10/1024/1024 "MB"}' 2>/dev/null || echo "网络接口未找到")"
+
+  if docker ps | grep -q aztec-sequencer; then
+    print_info "=== Aztec 容器性能 ==="
+    docker stats aztec-sequencer --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}" | tail -n1
+    print_info "Aztec API 响应时间 (ms): $(curl -s -w "%{time_total}" -o /dev/null http://localhost:8080/status 2>/dev/null || echo "N/A")"
+    local peers=$(curl -s http://localhost:8080/status 2>/dev/null | jq -r '.peers // empty' || echo "N/A")
+    echo "P2P 连接数: $peers"
+  else
+    print_warning "Aztec 容器未运行，无法监控容器指标。"
+  fi
+
+  echo ""
+  print_info "监控刷新间隔 (s): "
+  read -r interval
+  interval=${interval:-5}
+  print_warning "实时监控（按 Ctrl+C 停止）... (每 $interval s 更新)"
+  while true; do
+    clear
+    monitor_performance  # 递归调用以刷新（但避免无限循环，实际用 watch 或循环）
+    sleep "$interval"
+  done
+}
+
 # ==================== 主安装流程 ====================
 install_and_start_node() {
   clear
@@ -328,42 +439,17 @@ main_menu() {
     echo "     Aztec 节点安装 (简化版)"
     echo "========================================"
     echo "1. 安装/启动节点 (带选择)"
-    echo "2. 查看日志"
-    echo "3. 检查状态"
-    echo "4. 退出"
+    echo "2. 查看日志和状态"
+    echo "3. 更新并重启节点"
+    echo "4. 性能监控"
+    echo "5. 退出"
     read -p "选择: " choice
     case $choice in
       1) install_and_start_node ;;
-      2) docker logs -f aztec-sequencer 2>/dev/null || echo "未运行"; read -p "继续...";;
-      3)
-        if docker ps | grep -q aztec-sequencer; then
-          echo "运行中"
-          docker logs --tail 100 aztec-sequencer
-          echo ""
-          local api_status=$(curl -s http://localhost:8080/status 2>/dev/null || echo "")
-          if [[ -n "$api_status" && $(echo "$api_status" | jq -e '.error == null' 2>/dev/null) == "true" ]]; then
-            echo "$api_status"
-            print_success "API 响应正常！"
-          else
-            echo "$api_status"
-            print_error "API 响应异常或无响应！"
-          fi
-
-          # 更精确的日志错误检测：针对Aztec常见问题，如连接失败、同步错误、P2P问题
-          # 排除正常日志（如"no blocks"、"too far into slot"、"rate limit"）
-          local error_logs=$(docker logs --tail 100 aztec-sequencer 2>/dev/null | grep -E "(ERROR|WARN|FATAL|failed to|connection refused|timeout|sync failed|RPC error|P2P error|disconnected.*failed)" | grep -v -E "(no blocks|too far into slot|rate limit exceeded|yamux error)")
-          local error_count=$(echo "$error_logs" | wc -l)
-          if [[ "$error_count" -eq 0 ]]; then
-            print_success "日志正常，无明显错误！（P2P活跃，同步稳定）"
-          else
-            print_warning "日志中发现 $error_count 条潜在问题 (如连接/同步失败)，详情："
-            echo "$error_logs"
-          fi
-        else
-          print_error "节点未运行！"
-        fi
-        read -p "继续...";;
-      4) exit 0 ;;
+      2) view_logs_and_status ;;
+      3) update_and_restart_node ;;
+      4) monitor_performance ;;
+      5) exit 0 ;;
       *) echo "无效"; read -p "继续...";;
     esac
   done
