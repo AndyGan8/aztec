@@ -27,18 +27,19 @@ print_warning() { echo -e "\033[1;33m[WARNING]\033[0m $1"; }
 
 # ==================== 清理并重新安装 Aztec CLI ====================
 reinstall_aztec_cli() {
- print_warning "检测到 Aztec CLI 版本过旧或不支持 validator-keys，正在删除并重新安装最新版 (v2.1.2)..."
+ print_warning "Aztec CLI 版本过旧 (需 >=2.1.2)，正在删除并重新安装最新版 v2.1.2..."
  rm -rf "$HOME/.aztec"
  print_info "删除旧版完成"
  bash -i <(curl -s https://install.aztec.network)
  export PATH="$HOME/.aztec/bin:$PATH"
  print_info "基础安装完成"
- print_info "更新到最新稳定版 v2.1.2..."
+ print_info "更新到 v2.1.2..."
  aztec-up 2.1.2
  sleep 5
- print_success "重新安装完成 (新版本: $(aztec --version))"
+ local new_version=$(aztec --version 2>/dev/null || echo "未知")
+ print_success "重新安装完成 (新版本: $new_version)"
  if ! aztec validator-keys --help >/dev/null 2>&1; then
-  print_error "重新安装后 validator-keys 仍不可用！请手动检查网络或运行 aztec-up 2.1.2"
+  print_error "v2.1.2 安装后 validator-keys 仍不可用！检查网络或手动 aztec-up 2.1.2"
   read -p "按 Enter 继续 (或 Ctrl+C 退出)..."
  fi
 }
@@ -78,8 +79,6 @@ install_dependencies() {
  if ! command -v cast >/dev/null 2>&1; then
   print_info "安装 Foundry (包含 cast)..."
   curl -L https://foundry.paradigm.xyz | bash
-  # 注释掉 source，避免 PS1 unbound 错误
-  # source "$HOME/.bashrc"  # 非交互式 shell 可能出错
   export PATH="$HOME/.foundry/bin:$PATH"
   foundryup
   sleep 2
@@ -100,17 +99,16 @@ install_dependencies() {
   reinstall_aztec_cli
  else
   print_info "Aztec CLI 已存在，检查更新..."
-  # 更新到最新稳定版 v2.1.2（支持 validator-keys）
   aztec-up 2.1.2
   sleep 5
-  if ! aztec validator-keys --help >/dev/null 2>&1; then
-   print_warning "当前版本不支持 validator-keys，正在重新安装 v2.1.2..."
+  if [[ $(aztec --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "0.0.0") < "2.1.2" ]] || ! aztec validator-keys --help >/dev/null 2>&1; then
+   print_warning "版本 <2.1.2 或 validator-keys 不可用，正在重新安装 v2.1.2..."
    reinstall_aztec_cli
   fi
  fi
  print_success "Aztec CLI 更新完成 (版本: $(aztec --version))"
 
- # 永久添加 PATH 到 .bashrc（但不 source，现在）
+ # 永久添加 PATH
  echo 'export PATH="$HOME/.foundry/bin:$HOME/.aztec/bin:$PATH"' >> ~/.bashrc
  export PATH="$HOME/.foundry/bin:$HOME/.aztec/bin:$PATH"
 
@@ -139,7 +137,7 @@ check_environment() {
  done
  if [ ${#missing[@]} -gt 0 ]; then
   print_error "缺少命令: ${missing[*]}"
-  install_dependencies  # 自动安装
+  install_dependencies
   # 重新检查
   missing=()
   for cmd in docker jq cast aztec; do
@@ -153,15 +151,15 @@ check_environment() {
   fi
  fi
 
- # 额外检查：Aztec CLI 版本和 validator-keys 可用性
+ # 额外检查：Aztec CLI 版本和 validator-keys 可用性（强制版本检查）
  print_info "检查 Aztec CLI 版本和功能..."
- local aztec_version=$(aztec --version 2>/dev/null || echo "0.0.0")
+ local aztec_version=$(aztec --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "0.0.0")
  print_info "当前 Aztec CLI 版本: $aztec_version"
- if ! aztec validator-keys --help >/dev/null 2>&1; then
-  print_error "Aztec CLI 版本过旧或不支持 'validator-keys' 命令 (需 >=2.1.2)。正在自动删除并重新安装 v2.1.2..."
+ if [[ "$aztec_version" < "2.1.2" ]] || ! aztec validator-keys --help >/dev/null 2>&1; then
+  print_error "Aztec CLI 版本 $aztec_version 过旧或不支持 'validator-keys' (需 >=2.1.2)。正在自动删除并重装..."
   reinstall_aztec_cli
-  if ! aztec validator-keys --help >/dev/null 2>&1; then
-   print_error "重新安装失败！请手动运行: rm -rf ~/.aztec && bash -i <(curl -s https://install.aztec.network) && aztec-up 2.1.2"
+  if [[ $(aztec --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "0.0.0") < "2.1.2" ]] || ! aztec validator-keys --help >/dev/null 2>&1; then
+   print_error "重装失败！手动: rm -rf ~/.aztec && bash -i <(curl -s https://install.aztec.network) && aztec-up 2.1.2"
    return 1
   fi
  fi
@@ -326,8 +324,6 @@ view_logs_and_status() {
    print_error "API 响应异常或无响应！"
   fi
 
-  # 更精确的日志错误检测：针对Aztec常见问题，如连接失败、同步错误、P2P问题
-  # 排除正常日志（如"no blocks"、"too far into slot"、"rate limit"）
   local error_logs=$(docker logs --tail 100 aztec-sequencer 2>/dev/null | grep -E "(ERROR|WARN|FATAL|failed to|connection refused|timeout|sync failed|RPC error|P2P error|disconnected.*failed)" | grep -v -E "(no blocks|too far into slot|rate limit exceeded|yamux error)")
   local error_count=$(echo "$error_logs" | wc -l)
   if [[ "$error_count" -eq 0 ]]; then
@@ -382,7 +378,7 @@ monitor_performance() {
  print_warning "实时监控（按 Ctrl+C 停止）... (每 $interval s 更新)"
  while true; do
   clear
-  monitor_performance # 注意：这会递归调用，实际使用时可优化为循环内部执行命令
+  monitor_performance
   sleep "$interval"
  done
 }
@@ -397,92 +393,90 @@ enable_monitoring_dashboard() {
 
  cd "$AZTEC_DIR"
 
- # 生成 prometheus.yml（监控 Aztec 和 Docker）
  cat > prometheus.yml <<EOF
 global:
  scrape_interval: 15s
 scrape_configs:
  - job_name: 'aztec-node'
  static_configs:
- - targets: ['aztec-sequencer:8080'] # Aztec metrics (假设暴露 /metrics)
+ - targets: ['aztec-sequencer:8080']
  - job_name: 'docker'
  static_configs:
- - targets: ['host.docker.internal:9323'] # Docker metrics via cAdvisor (可选)
+ - targets: ['host.docker.internal:9323']
 EOF
 
- # 更新 docker-compose.yml 添加 Prometheus 和 Grafana
  cat > docker-compose.yml <<'EOF'
 services:
  aztec-sequencer:
- image: "aztecprotocol/aztec:latest"
- container_name: "aztec-sequencer"
- ports:
- - ${AZTEC_PORT}:${AZTEC_PORT}
- - ${AZTEC_ADMIN_PORT}:${AZTEC_ADMIN_PORT}
- - ${P2P_PORT}:${P2P_PORT}
- - ${P2P_PORT}:${P2P_PORT}/udp
- volumes:
- - ${DATA_DIRECTORY}:/var/lib/data
- - ${KEY_STORE_DIRECTORY}:/var/lib/keystore
- environment:
- KEY_STORE_DIRECTORY: /var/lib/keystore
- DATA_DIRECTORY: /var/lib/data
- LOG_LEVEL: ${LOG_LEVEL}
- ETHEREUM_HOSTS: ${ETHEREUM_HOSTS}
- L1_CONSENSUS_HOST_URLS: ${L1_CONSENSUS_HOST_URLS}
- P2P_IP: ${P2P_IP}
- P2P_PORT: ${P2P_PORT}
- AZTEC_PORT: ${AZTEC_PORT}
- AZTEC_ADMIN_PORT: ${AZTEC_ADMIN_PORT}
- VALIDATOR_PRIVATE_KEY: ${VALIDATOR_PRIVATE_KEY}
- COINBASE: ${COINBASE}
- entrypoint: >-
- node
- --no-warnings
- /usr/src/yarn-project/aztec/dest/bin/index.js
- start
- --node
- --archiver
- --sequencer
- --network testnet
- networks:
- - aztec
- restart: always
+  image: "aztecprotocol/aztec:latest"
+  container_name: "aztec-sequencer"
+  ports:
+   - ${AZTEC_PORT}:${AZTEC_PORT}
+   - ${AZTEC_ADMIN_PORT}:${AZTEC_ADMIN_PORT}
+   - ${P2P_PORT}:${P2P_PORT}
+   - ${P2P_PORT}:${P2P_PORT}/udp
+  volumes:
+   - ${DATA_DIRECTORY}:/var/lib/data
+   - ${KEY_STORE_DIRECTORY}:/var/lib/keystore
+  environment:
+   KEY_STORE_DIRECTORY: /var/lib/keystore
+   DATA_DIRECTORY: /var/lib/data
+   LOG_LEVEL: ${LOG_LEVEL}
+   ETHEREUM_HOSTS: ${ETHEREUM_HOSTS}
+   L1_CONSENSUS_HOST_URLS: ${L1_CONSENSUS_HOST_URLS}
+   P2P_IP: ${P2P_IP}
+   P2P_PORT: ${P2P_PORT}
+   AZTEC_PORT: ${AZTEC_PORT}
+   AZTEC_ADMIN_PORT: ${AZTEC_ADMIN_PORT}
+   VALIDATOR_PRIVATE_KEY: ${VALIDATOR_PRIVATE_KEY}
+   COINBASE: ${COINBASE}
+  entrypoint: >-
+   node
+   --no-warnings
+   /usr/src/yarn-project/aztec/dest/bin/index.js
+   start
+   --node
+   --archiver
+   --sequencer
+   --network testnet
+  networks:
+   - aztec
+  restart: always
 
  prometheus:
- image: prom/prometheus:latest
- container_name: "prometheus"
- ports:
- - "9090:9090"
- volumes:
- - ./prometheus.yml:/etc/prometheus/prometheus.yml
- command: --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/prometheus
- networks:
- - aztec
- restart: always
+  image: prom/prometheus:latest
+  container_name: "prometheus"
+  ports:
+   - "9090:9090"
+  volumes:
+   - ./prometheus.yml:/etc/prometheus/prometheus.yml
+  command: --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/prometheus
+  networks:
+   - aztec
+  restart: always
 
  grafana:
- image: grafana/grafana:latest
- container_name: "grafana"
- ports:
- - "3000:3000"
- volumes:
- - grafana-data:/var/lib/grafana
- environment:
- - GF_SECURITY_ADMIN_PASSWORD=admin # 生产中修改！
- - GF_USERS_ALLOW_SIGN_UP=false
- depends_on:
- - prometheus
- networks:
- - aztec
- restart: always
+  image: grafana/grafana:latest
+  container_name: "grafana"
+  ports:
+   - "3000:3000"
+  volumes:
+   - grafana-data:/var/lib/grafana
+  environment:
+   - GF_SECURITY_ADMIN_PASSWORD=admin
+   - GF_USERS_ALLOW_SIGN_UP=false
+  depends_on:
+   - prometheus
+  networks:
+   - aztec
+  restart: always
 
 volumes:
  grafana-data:
 
 networks:
  aztec:
- name: aztec
+  name: aztec
 EOF
 
  print_success "监控配置文件生成完成！"
@@ -509,7 +503,7 @@ install_and_start_node() {
  print_info "Aztec 测试网节点安装 (简化版)"
  echo "=========================================="
 
- if ! check_environment; then  # 这会自动安装依赖并检查版本
+ if ! check_environment; then
   return 1
  fi
 
@@ -531,26 +525,22 @@ install_and_start_node() {
   print_info "旧地址: $old_address"
  fi
 
- # 选择模式（简化：无选项2）
  echo ""
  print_info "选择模式："
  echo "1. 生成新地址 (自动注册)"
  echo "2. 加载现有 keystore.json (推荐，用于已注册地址)"
  read -p "请选择 (1-2): " mode_choice
- local new_eth_key new_bls_key new_address is_new=false
+ local new_eth_key new_bls_key new_address
 
  case $mode_choice in
  1)
-  # 选项1: 生成新
   print_info "生成新密钥..."
   rm -rf "$HOME/.aztec/keystore" 2>/dev/null || true
   aztec validator-keys new --fee-recipient 0x0000000000000000000000000000000000000000000000000000000000000000
   new_eth_key=$(jq -r '.validators[0].attester.eth' "$DEFAULT_KEYSTORE")
   new_bls_key=$(jq -r '.validators[0].attester.bls' "$DEFAULT_KEYSTORE")
   new_address=$(generate_address_from_private_key "$new_eth_key")
-  is_new=true
   print_success "新地址: $new_address"
-  # 密钥打印
   echo ""
   print_warning "=== 保存密钥！ ==="
   echo "ETH 私钥: $new_eth_key"
@@ -558,7 +548,6 @@ install_and_start_node() {
   echo "地址: $new_address"
   read -p "确认保存后继续..."
 
-  # 授权、转账、注册
   if ! check_and_approve_stake "$ETH_RPC" "$OLD_PRIVATE_KEY" "$old_address"; then return 1; fi
   if ! check_eth_balance "$ETH_RPC" "$new_address"; then
    print_warning "转 ETH 到 $new_address (0.3 ETH)"
@@ -569,7 +558,6 @@ install_and_start_node() {
   print_success "注册成功"
   ;;
  2)
-  # 选项2: 加载现有 (原3)
   echo "输入 keystore.json 路径 (默认 $DEFAULT_KEYSTORE): "
   read -p "路径: " keystore_path
   keystore_path=${keystore_path:-$DEFAULT_KEYSTORE}
@@ -578,7 +566,6 @@ install_and_start_node() {
   new_bls_key="$LOADED_BLS_KEY"
   new_address="$LOADED_ADDRESS"
   cp "$LOADED_KEYSTORE" "$KEY_DIR/keystore.json"
-  # 跳过授权/转账/注册
   if [[ -n "$OLD_PRIVATE_KEY" ]]; then
    check_and_approve_stake "$ETH_RPC" "$OLD_PRIVATE_KEY" "$old_address" || true
   fi
@@ -596,7 +583,6 @@ install_and_start_node() {
   ;;
  esac
 
- # 统一设置环境
  print_info "设置节点环境..."
  mkdir -p "$AZTEC_DIR" "$DATA_DIR" "$KEY_DIR"
  local public_ip=$(curl -s ipv4.icanhazip.com || echo "127.0.0.1")
@@ -615,50 +601,48 @@ VALIDATOR_PRIVATE_KEY=${new_eth_key}
 COINBASE=${new_address}
 EOF
 
- # 基础 docker-compose.yml (监控服务将在选项5中添加)
  cat > "$AZTEC_DIR/docker-compose.yml" <<'EOF'
 services:
  aztec-sequencer:
- image: "aztecprotocol/aztec:latest"
- container_name: "aztec-sequencer"
- ports:
- - ${AZTEC_PORT}:${AZTEC_PORT}
- - ${AZTEC_ADMIN_PORT}:${AZTEC_ADMIN_PORT}
- - ${P2P_PORT}:${P2P_PORT}
- - ${P2P_PORT}:${P2P_PORT}/udp
- volumes:
- - ${DATA_DIRECTORY}:/var/lib/data
- - ${KEY_STORE_DIRECTORY}:/var/lib/keystore
- environment:
- KEY_STORE_DIRECTORY: /var/lib/keystore
- DATA_DIRECTORY: /var/lib/data
- LOG_LEVEL: ${LOG_LEVEL}
- ETHEREUM_HOSTS: ${ETHEREUM_HOSTS}
- L1_CONSENSUS_HOST_URLS: ${L1_CONSENSUS_HOST_URLS}
- P2P_IP: ${P2P_IP}
- P2P_PORT: ${P2P_PORT}
- AZTEC_PORT: ${AZTEC_PORT}
- AZTEC_ADMIN_PORT: ${AZTEC_ADMIN_PORT}
- VALIDATOR_PRIVATE_KEY: ${VALIDATOR_PRIVATE_KEY}
- COINBASE: ${COINBASE}
- entrypoint: >-
- node
- --no-warnings
- /usr/src/yarn-project/aztec/dest/bin/index.js
- start
- --node
- --archiver
- --sequencer
- --network testnet
- networks:
- - aztec
- restart: always
+  image: "aztecprotocol/aztec:latest"
+  container_name: "aztec-sequencer"
+  ports:
+   - ${AZTEC_PORT}:${AZTEC_PORT}
+   - ${AZTEC_ADMIN_PORT}:${AZTEC_ADMIN_PORT}
+   - ${P2P_PORT}:${P2P_PORT}
+   - ${P2P_PORT}:${P2P_PORT}/udp
+  volumes:
+   - ${DATA_DIRECTORY}:/var/lib/data
+   - ${KEY_STORE_DIRECTORY}:/var/lib/keystore
+  environment:
+   KEY_STORE_DIRECTORY: /var/lib/keystore
+   DATA_DIRECTORY: /var/lib/data
+   LOG_LEVEL: ${LOG_LEVEL}
+   ETHEREUM_HOSTS: ${ETHEREUM_HOSTS}
+   L1_CONSENSUS_HOST_URLS: ${L1_CONSENSUS_HOST_URLS}
+   P2P_IP: ${P2P_IP}
+   P2P_PORT: ${P2P_PORT}
+   AZTEC_PORT: ${AZTEC_PORT}
+   AZTEC_ADMIN_PORT: ${AZTEC_ADMIN_PORT}
+   VALIDATOR_PRIVATE_KEY: ${VALIDATOR_PRIVATE_KEY}
+   COINBASE: ${COINBASE}
+  entrypoint: >-
+   node
+   --no-warnings
+   /usr/src/yarn-project/aztec/dest/bin/index.js
+   start
+   --node
+   --archiver
+   --sequencer
+   --network testnet
+  networks:
+   - aztec
+  restart: always
 networks:
  aztec:
- name: aztec
+  name: aztec
 EOF
 
- # 启动
  print_info "启动节点..."
  cd "$AZTEC_DIR"
  docker compose up -d
