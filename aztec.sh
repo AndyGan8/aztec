@@ -338,11 +338,29 @@ main_menu() {
       3)
         if docker ps | grep -q aztec-sequencer; then
           echo "运行中"
-          docker logs --tail 100 aztec-sequencer  # 修改为100行
+          docker logs --tail 100 aztec-sequencer
           echo ""
-          curl -s http://localhost:8080/status || echo "API 未响应"
+          local api_status=$(curl -s http://localhost:8080/status 2>/dev/null || echo "")
+          if [[ -n "$api_status" && $(echo "$api_status" | jq -e '.error == null' 2>/dev/null) == "true" ]]; then
+            echo "$api_status"
+            print_success "API 响应正常！"
+          else
+            echo "$api_status"
+            print_error "API 响应异常或无响应！"
+          fi
+
+          # 更精确的日志错误检测：针对Aztec常见问题，如连接失败、同步错误、P2P问题
+          # 排除正常日志（如"no blocks"、"too far into slot"、"rate limit"）
+          local error_logs=$(docker logs --tail 100 aztec-sequencer 2>/dev/null | grep -E "(ERROR|WARN|FATAL|failed to|connection refused|timeout|sync failed|RPC error|P2P error|disconnected.*failed)" | grep -v -E "(no blocks|too far into slot|rate limit exceeded|yamux error)")
+          local error_count=$(echo "$error_logs" | wc -l)
+          if [[ "$error_count" -eq 0 ]]; then
+            print_success "日志正常，无明显错误！（P2P活跃，同步稳定）"
+          else
+            print_warning "日志中发现 $error_count 条潜在问题 (如连接/同步失败)，详情："
+            echo "$error_logs"
+          fi
         else
-          echo "未运行"
+          print_error "节点未运行！"
         fi
         read -p "继续...";;
       4) exit 0 ;;
