@@ -450,11 +450,11 @@ install_and_start_node() {
 
  echo ""
  echo "请输入基础信息："
- read -s -p "L1 执行 RPC URL (e.g., https://ethereum-sepolia-rpc.publicnode.com): " ETH_RPC  # 优化: -s 隐藏 (虽 URL 不敏，但一致)
+ read -p "L1 执行 RPC URL (e.g., https://ethereum-sepolia-rpc.publicnode.com): " ETH_RPC
  echo
- read -s -p "L1 共识 Beacon RPC URL (e.g., https://ethereum-sepolia-beacon-api.publicnode.com): " CONS_RPC  # 同上
+ read -p "L1 共识 Beacon RPC URL (e.g., https://ethereum-sepolia-beacon-api.publicnode.com): " CONS_RPC
  echo
- read -s -p "Funding 私钥 (用于授权和质押 STAKE，必须有 200k STAKE 和 0.2 ETH): " FUNDING_PRIVATE_KEY  # 优化: -s 隐藏
+ read -s -p "Funding 私钥 (用于授权和质押 STAKE，必须有 200k STAKE 和 0.2 ETH): " FUNDING_PRIVATE_KEY
  echo ""
 
  if [[ -n "$FUNDING_PRIVATE_KEY" && ! "$FUNDING_PRIVATE_KEY" =~ ^0x[a-fA-F0-9]{64}$ ]]; then
