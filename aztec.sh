@@ -25,6 +25,24 @@ print_success() { echo -e "\033[1;32m[SUCCESS]\033[0m $1"; }
 print_error() { echo -e "\033[1;31m[ERROR]\033[0m $1"; }
 print_warning() { echo -e "\033[1;33m[WARNING]\033[0m $1"; }
 
+# ==================== 清理并重新安装 Aztec CLI ====================
+reinstall_aztec_cli() {
+ print_warning "检测到 Aztec CLI 版本过旧或不支持 validator-keys，正在删除并重新安装..."
+ rm -rf "$HOME/.aztec"
+ print_info "删除旧版完成"
+ bash -i <(curl -s https://install.aztec.network)
+ export PATH="$HOME/.aztec/bin:$PATH"
+ print_info "基础安装完成"
+ print_info "更新到测试网版本..."
+ aztec-up testnet 2>/dev/null || aztec-up 2.0.2 2>/dev/null || aztec-up latest
+ sleep 5
+ print_success "重新安装完成 (新版本: $(aztec --version))"
+ if ! aztec validator-keys --help >/dev/null 2>&1; then
+  print_error "重新安装后 validator-keys 仍不可用！请手动检查网络或运行 aztec-up testnet"
+  read -p "按 Enter 继续 (或 Ctrl+C 退出)..."
+ fi
+}
+
 # ==================== 安装依赖 ====================
 install_dependencies() {
  print_info "检测到缺失依赖，正在自动安装..."
@@ -75,28 +93,20 @@ install_dependencies() {
   print_info "Foundry 已存在，跳过"
  fi
 
- # 安装 Aztec CLI（如果缺失）
+ # 安装/更新 Aztec CLI
+ export PATH="$HOME/.aztec/bin:$PATH"
  if ! command -v aztec >/dev/null 2>&1; then
   print_info "安装 Aztec CLI..."
-  rm -rf "$HOME/.aztec"  # 清理旧版
-  bash -i <(curl -s https://install.aztec.network)
-  export PATH="$HOME/.aztec/bin:$PATH"
+  reinstall_aztec_cli
  else
   print_info "Aztec CLI 已存在，检查更新..."
-  export PATH="$HOME/.aztec/bin:$PATH"
- fi
-
- # 强制更新到测试网版（支持 validator-keys）
- print_info "更新 Aztec CLI 到测试网版本..."
- aztec-up testnet 2>/dev/null || aztec-up 2.0.2 2>/dev/null || aztec-up latest
- sleep 5
-
- # 验证 validator-keys
- if ! aztec validator-keys --help >/dev/null 2>&1; then
-  print_error "validator-keys 仍不可用！手动运行: rm -rf ~/.aztec && bash -i <(curl -s https://install.aztec.network) && aztec-up testnet"
-  read -p "按 Enter 继续 (或 Ctrl+C 退出)..."
-  # 备用：提示手动生成
-  print_warning "备用: 使用 'aztec generate-l1-account' 生成 ETH 密钥，然后手动创建 keystore.json"
+  # 更新到测试网版（支持 validator-keys）
+  aztec-up testnet 2>/dev/null || aztec-up 2.0.2 2>/dev/null || aztec-up latest
+  sleep 5
+  if ! aztec validator-keys --help >/dev/null 2>&1; then
+   print_warning "当前版本不支持 validator-keys，正在重新安装..."
+   reinstall_aztec_cli
+  fi
  fi
  print_success "Aztec CLI 更新完成 (版本: $(aztec --version))"
 
@@ -142,6 +152,20 @@ check_environment() {
    return 1
   fi
  fi
+
+ # 额外检查：Aztec CLI 版本和 validator-keys 可用性
+ print_info "检查 Aztec CLI 版本和功能..."
+ local aztec_version=$(aztec --version 2>/dev/null || echo "0.0.0")
+ print_info "当前 Aztec CLI 版本: $aztec_version"
+ if ! aztec validator-keys --help >/dev/null 2>&1; then
+  print_error "Aztec CLI 版本过旧或不支持 'validator-keys' 命令 (需 >=2.0)。正在自动删除并重新安装..."
+  reinstall_aztec_cli
+  if ! aztec validator-keys --help >/dev/null 2>&1; then
+   print_error "重新安装失败！请手动运行: rm -rf ~/.aztec && bash -i <(curl -s https://install.aztec.network) && aztec-up testnet"
+   return 1
+  fi
+ fi
+ print_success "Aztec CLI 功能检查通过 (validator-keys 可用)"
  print_success "环境检查通过"
  return 0
 }
@@ -485,7 +509,7 @@ install_and_start_node() {
  print_info "Aztec 测试网节点安装 (简化版)"
  echo "=========================================="
 
- if ! check_environment; then  # 这会自动安装依赖
+ if ! check_environment; then  # 这会自动安装依赖并检查版本
   return 1
  fi
 
