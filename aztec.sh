@@ -27,18 +27,18 @@ print_warning() { echo -e "\033[1;33m[WARNING]\033[0m $1"; }
 
 # ==================== 清理并重新安装 Aztec CLI ====================
 reinstall_aztec_cli() {
- print_warning "检测到 Aztec CLI 版本过旧或不支持 validator-keys，正在删除并重新安装..."
+ print_warning "检测到 Aztec CLI 版本过旧或不支持 validator-keys，正在删除并重新安装最新版 (v2.1.2)..."
  rm -rf "$HOME/.aztec"
  print_info "删除旧版完成"
  bash -i <(curl -s https://install.aztec.network)
  export PATH="$HOME/.aztec/bin:$PATH"
  print_info "基础安装完成"
- print_info "更新到测试网版本..."
- aztec-up testnet 2>/dev/null || aztec-up 2.0.2 2>/dev/null || aztec-up latest
+ print_info "更新到最新稳定版 v2.1.2..."
+ aztec-up 2.1.2
  sleep 5
  print_success "重新安装完成 (新版本: $(aztec --version))"
  if ! aztec validator-keys --help >/dev/null 2>&1; then
-  print_error "重新安装后 validator-keys 仍不可用！请手动检查网络或运行 aztec-up testnet"
+  print_error "重新安装后 validator-keys 仍不可用！请手动检查网络或运行 aztec-up 2.1.2"
   read -p "按 Enter 继续 (或 Ctrl+C 退出)..."
  fi
 }
@@ -100,11 +100,11 @@ install_dependencies() {
   reinstall_aztec_cli
  else
   print_info "Aztec CLI 已存在，检查更新..."
-  # 更新到测试网版（支持 validator-keys）
-  aztec-up testnet 2>/dev/null || aztec-up 2.0.2 2>/dev/null || aztec-up latest
+  # 更新到最新稳定版 v2.1.2（支持 validator-keys）
+  aztec-up 2.1.2
   sleep 5
   if ! aztec validator-keys --help >/dev/null 2>&1; then
-   print_warning "当前版本不支持 validator-keys，正在重新安装..."
+   print_warning "当前版本不支持 validator-keys，正在重新安装 v2.1.2..."
    reinstall_aztec_cli
   fi
  fi
@@ -158,10 +158,10 @@ check_environment() {
  local aztec_version=$(aztec --version 2>/dev/null || echo "0.0.0")
  print_info "当前 Aztec CLI 版本: $aztec_version"
  if ! aztec validator-keys --help >/dev/null 2>&1; then
-  print_error "Aztec CLI 版本过旧或不支持 'validator-keys' 命令 (需 >=2.0)。正在自动删除并重新安装..."
+  print_error "Aztec CLI 版本过旧或不支持 'validator-keys' 命令 (需 >=2.1.2)。正在自动删除并重新安装 v2.1.2..."
   reinstall_aztec_cli
   if ! aztec validator-keys --help >/dev/null 2>&1; then
-   print_error "重新安装失败！请手动运行: rm -rf ~/.aztec && bash -i <(curl -s https://install.aztec.network) && aztec-up testnet"
+   print_error "重新安装失败！请手动运行: rm -rf ~/.aztec && bash -i <(curl -s https://install.aztec.network) && aztec-up 2.1.2"
    return 1
   fi
  fi
