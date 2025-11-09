@@ -78,30 +78,27 @@ install_dependencies() {
  # 安装 Aztec CLI（如果缺失）
  if ! command -v aztec >/dev/null 2>&1; then
   print_info "安装 Aztec CLI..."
+  rm -rf "$HOME/.aztec"  # 清理旧版
   bash -i <(curl -s https://install.aztec.network)
-  # 注释掉 source，避免 PS1 unbound 错误
-  # source "$HOME/.bashrc"
   export PATH="$HOME/.aztec/bin:$PATH"
  else
   print_info "Aztec CLI 已存在，检查更新..."
   export PATH="$HOME/.aztec/bin:$PATH"
  fi
 
- # 更新 Aztec CLI 到最新版本（修复未知命令问题）
- if command -v aztec >/dev/null 2>&1; then
-  print_info "更新 Aztec CLI 到最新版本..."
-  aztec-up || aztec-up latest  # 尝试 latest 或默认
-  sleep 5  # 等待更新完成
-  aztec version  # 测试版本命令
-  if ! aztec validator-keys --help >/dev/null 2>&1; then
-   print_warning "validator-keys 子命令仍不可用，可能需手动 aztec-up 2.0.2"
-   read -p "按 Enter 继续 (或 Ctrl+C 退出)..."
-  fi
-  print_success "Aztec CLI 更新完成"
- else
-  print_error "Aztec CLI 安装失败，请手动运行安装命令"
+ # 强制更新到测试网版（支持 validator-keys）
+ print_info "更新 Aztec CLI 到测试网版本..."
+ aztec-up testnet 2>/dev/null || aztec-up 2.0.2 2>/dev/null || aztec-up latest
+ sleep 5
+
+ # 验证 validator-keys
+ if ! aztec validator-keys --help >/dev/null 2>&1; then
+  print_error "validator-keys 仍不可用！手动运行: rm -rf ~/.aztec && bash -i <(curl -s https://install.aztec.network) && aztec-up testnet"
   read -p "按 Enter 继续 (或 Ctrl+C 退出)..."
+  # 备用：提示手动生成
+  print_warning "备用: 使用 'aztec generate-l1-account' 生成 ETH 密钥，然后手动创建 keystore.json"
  fi
+ print_success "Aztec CLI 更新完成 (版本: $(aztec --version))"
 
  # 永久添加 PATH 到 .bashrc（但不 source，现在）
  echo 'export PATH="$HOME/.foundry/bin:$HOME/.aztec/bin:$PATH"' >> ~/.bashrc
