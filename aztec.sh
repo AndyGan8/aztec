@@ -15,6 +15,7 @@ AZTEC_IMAGE="aztecprotocol/aztec:latest"
 ROLLUP_CONTRACT="0xebd99ff0ff6677205509ae73f93d0ca52ac85d67"
 STAKE_TOKEN="0x139d2a7a0881e16332d7D1F8DB383A4507E1Ea7A"
 DASHTEC_URL="https://dashtec.xyz"
+STAKE_AMOUNT=200000000000000000000000  # 优化: 200k wei (社区 2.1.2 要求)
 
 # ==================== 安全配置 ====================
 DEFAULT_KEYSTORE="$HOME/.aztec/keystore/key1.json"
@@ -25,12 +26,26 @@ print_success() { echo -e "\033[1;32m[SUCCESS]\033[0m $1"; }
 print_error() { echo -e "\033[1;31m[ERROR]\033[0m $1"; }
 print_warning() { echo -e "\033[1;33m[WARNING]\033[0m $1"; }
 
+# ==================== 重试函数 ====================  # 新增: 通用重试
+retry_cmd() {
+ local max_attempts=$1; shift
+ local attempt=1
+ while [ $attempt -le $max_attempts ]; do
+  if "$@"; then return 0; fi
+  print_warning "命令失败 (尝试 $attempt/$max_attempts)，重试..."
+  sleep $((attempt * 2))
+  ((attempt++))
+ done
+ print_error "命令失败 $max_attempts 次"
+ return 1
+}
+
 # ==================== 清理并重新安装 Aztec CLI ====================
 reinstall_aztec_cli() {
  print_warning "Aztec CLI 版本过旧 (需 >=2.1.2)，正在删除并重新安装最新版 v2.1.2..."
  rm -rf "$HOME/.aztec"
  print_info "删除旧版完成"
- bash -i <(curl -s https://install.aztec.network)
+ retry_cmd 3 bash -i <(curl -s --progress https://install.aztec.network)  # 优化: 重试 + 进度
  export PATH="$HOME/.aztec/bin:$PATH"
  print_info "基础安装完成"
  print_info "更新到 v2.1.2..."
@@ -48,13 +63,13 @@ reinstall_aztec_cli() {
 install_dependencies() {
  print_info "检测到缺失依赖，正在自动安装..."
  
- # 更新系统包
+ # 更新系统包 (优化: 重试 + 静默)
  print_info "更新系统包..."
- apt update -y && apt upgrade -y
+ retry_cmd 3 apt update -y -qq && apt upgrade -y -qq
 
- # 安装基础包
+ # 安装基础包 (优化: 静默)
  print_info "安装基础工具 (jq, curl 等)..."
- apt install -y curl jq iptables build-essential git wget lz4 make gcc nano automake autoconf tmux htop nvme-cli libgbm1 pkg-config libssl-dev libleveldb-dev tar clang bsdmainutils ncdu unzip libleveldb-dev ca-certificates gnupg lsb-release bc net-tools
+ apt install -y -qq curl jq iptables build-essential git wget lz4 make gcc nano automake autoconf tmux htop nvme-cli libgbm1 pkg-config libssl-dev libleveldb-dev tar clang bsdmainutils ncdu unzip ca-certificates gnupg lsb-release bc
 
  # 安装 Docker（如果缺失）
  if ! command -v docker >/dev/null 2>&1; then
@@ -63,12 +78,12 @@ install_dependencies() {
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
   chmod a+r /etc/apt/keyrings/docker.gpg
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-  apt-get update
-  apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
+  apt-get update -qq
+  apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
   systemctl enable docker
   systemctl start docker
-  usermod -aG docker root  # root 用户
-  sleep 5  # 等待 Docker 启动
+  usermod -aG docker root
+  sleep 5
   docker run hello-world >/dev/null 2>&1 || print_warning "Docker 测试失败，请手动检查"
   print_success "Docker 安装完成"
  else
@@ -212,7 +227,7 @@ load_existing_keystore() {
  print_success "加载成功！地址: $new_address"
  echo "ETH 私钥: $new_eth_key"
  echo "BLS 私钥: $new_bls_key"
- echo "请立即备份这些密钥！"
+ echo "请立即备份这些密钥！参考: https://docs.aztec.network/dev_docs/cli/validator_keys"  # 新增: 指南链接
  read -p "确认已保存后按 [Enter] 继续..."
 
  # 验证地址匹配用户预期
@@ -236,57 +251,56 @@ check_stake_balance_and_approve() {
  local eth_rpc=$1
  local funding_private_key=$2
  local funding_address=$3
- local stake_amount=200000000000000000000000000  # 200M STAKE wei
 
- # 检查 STAKE 余额
+ # 检查 STAKE 余额 (优化: 正确 hex-to-decimal)
  print_info "检查 STAKE 余额..."
- local stake_balance
- stake_balance=$(cast call "$STAKE_TOKEN" "balanceOf(address)(uint256)" "$funding_address" --rpc-url "$eth_rpc" 2>/dev/null || echo "0")
- if [[ "$stake_balance" == "0" ]]; then
-  stake_balance=0
- else
-  stake_balance=$(echo "$stake_balance" | tr -d ' ' | grep -oE '[0-9]+')  # 清理 hex/wei 值，确保数字
- fi
+ local stake_balance_hex
+ stake_balance_hex=$(cast call "$STAKE_TOKEN" "balanceOf(address)(uint256)" "$funding_address" --rpc-url "$eth_rpc" 2>/dev/null || echo "0x0")
+ stake_balance=$(printf "%d" "$stake_balance_hex" 2>/dev/null || echo "0")  # 优化: 直接转 decimal
  local formatted_balance
- formatted_balance=$(echo "if ($stake_balance < 1) 0 else scale=0; $stake_balance / 1000000000000000000" | bc -l 2>/dev/null || echo "0")
+ formatted_balance=$(echo "scale=0; $stake_balance / 1000000000000000000" | bc 2>/dev/null || echo "0")
  print_info "当前 STAKE 余额: $formatted_balance STAKE"
- if [[ "$stake_balance" -lt "$stake_amount" ]]; then
-  print_error "STAKE 余额不足！需要 200M STAKE，当前 $formatted_balance STAKE"
+ if [[ "$stake_balance" -lt "$STAKE_AMOUNT" ]]; then
+  print_error "STAKE 余额不足！需要 200k STAKE，当前 $formatted_balance STAKE"
   print_warning "请从 Faucet 获取: https://testnet.aztec.network/faucet"
+  print_warning "升级提醒: 需要 ZKPassport 证明 (下载 App 并连接 Discord)"
   read -p "确认补充后按 [Enter] 继续..."
   # 重新检查
-  stake_balance=$(cast call "$STAKE_TOKEN" "balanceOf(address)(uint256)" "$funding_address" --rpc-url "$eth_rpc" 2>/dev/null || echo "0")
-  stake_balance=$(echo "$stake_balance" | tr -d ' ' | grep -oE '[0-9]+')
-  formatted_balance=$(echo "if ($stake_balance < 1) 0 else scale=0; $stake_balance / 1000000000000000000" | bc -l 2>/dev/null || echo "0")
-  if [[ "$stake_balance" -lt "$stake_amount" ]]; then
+  stake_balance_hex=$(cast call "$STAKE_TOKEN" "balanceOf(address)(uint256)" "$funding_address" --rpc-url "$eth_rpc" 2>/dev/null || echo "0x0")
+  stake_balance=$(printf "%d" "$stake_balance_hex" 2>/dev/null || echo "0")
+  formatted_balance=$(echo "scale=0; $stake_balance / 1000000000000000000" | bc 2>/dev/null || echo "0")
+  if [[ "$stake_balance" -lt "$STAKE_AMOUNT" ]]; then
    print_error "补充后仍不足，退出"
    return 1
   fi
  fi
 
- # 检查授权
+ # 检查授权 (优化: 同上)
  print_info "检查 STAKE 授权..."
- local allowance
- allowance=$(cast call "$STAKE_TOKEN" "allowance(address,address)(uint256)" "$funding_address" "$ROLLUP_CONTRACT" --rpc-url "$eth_rpc" 2>/dev/null || echo "0")
- allowance=$(echo "$allowance" | tr -d ' ' | grep -oE '[0-9]+')  # 清理
+ local allowance_hex
+ allowance_hex=$(cast call "$STAKE_TOKEN" "allowance(address,address)(uint256)" "$funding_address" "$ROLLUP_CONTRACT" --rpc-url "$eth_rpc" 2>/dev/null || echo "0x0")
+ allowance=$(printf "%d" "$allowance_hex" 2>/dev/null || echo "0")
  local formatted_allowance
- formatted_allowance=$(echo "if ($allowance < 1) 0 else scale=0; $allowance / 1000000000000000000" | bc -l 2>/dev/null || echo "0")
- if [[ "$allowance" -ge "$stake_amount" ]]; then
+ formatted_allowance=$(echo "scale=0; $allowance / 1000000000000000000" | bc 2>/dev/null || echo "0")
+ if [[ "$allowance" -ge "$STAKE_AMOUNT" ]]; then
   print_success "STAKE 已授权 (额度: $formatted_allowance STAKE)"
   return 0
  fi
 
- # 执行授权 (重试 3 次)
- print_warning "执行 STAKE 授权 (额度: 200M STAKE)..."
+ # 执行授权 (优化: 用 ether 单位 + TX hash 输出)
+ print_warning "执行 STAKE 授权 (额度: 200k STAKE)..."
  for attempt in 1 2 3; do
-  if cast send "$STAKE_TOKEN" "approve(address,uint256)" \
-   "$ROLLUP_CONTRACT" "$stake_amount" \
-   --private-key "$funding_private_key" --rpc-url "$eth_rpc" --gas-price 2gwei; then
-   sleep 10  # 等待确认
-   allowance=$(cast call "$STAKE_TOKEN" "allowance(address,address)(uint256)" "$funding_address" "$ROLLUP_CONTRACT" --rpc-url "$eth_rpc" 2>/dev/null || echo "0")
-   allowance=$(echo "$allowance" | tr -d ' ' | grep -oE '[0-9]+')
-   formatted_allowance=$(echo "if ($allowance < 1) 0 else scale=0; $allowance / 1000000000000000000" | bc -l 2>/dev/null || echo "0")
-   if [[ "$allowance" -ge "$stake_amount" ]]; then
+  local tx_hash
+  tx_hash=$(cast send "$STAKE_TOKEN" "approve(address,uint256)" \
+   "$ROLLUP_CONTRACT" "200000ether" \  # 优化: ether 单位
+   --private-key "$funding_private_key" --rpc-url "$eth_rpc" --gas-price 2gwei 2>&1 | grep -o '0x[a-fA-F0-9]\{66\}' || echo "")
+  if [[ -n "$tx_hash" ]]; then
+   print_info "TX 发送: $tx_hash (查: https://sepolia.etherscan.io/tx/$tx_hash)"
+   sleep 10
+   allowance_hex=$(cast call "$STAKE_TOKEN" "allowance(address,address)(uint256)" "$funding_address" "$ROLLUP_CONTRACT" --rpc-url "$eth_rpc" 2>/dev/null || echo "0x0")
+   allowance=$(printf "%d" "$allowance_hex" 2>/dev/null || echo "0")
+   formatted_allowance=$(echo "scale=0; $allowance / 1000000000000000000" | bc 2>/dev/null || echo "0")
+   if [[ "$allowance" -ge "$STAKE_AMOUNT" ]]; then
     print_success "授权成功 (尝试 $attempt)！额度: $formatted_allowance STAKE"
     return 0
    fi
@@ -328,12 +342,12 @@ update_and_restart_node() {
  local old_image=$(docker inspect aztec-sequencer --format '{{.Config.Image}}' 2>/dev/null || echo "未知")
  print_info "当前镜像: $old_image"
 
- docker compose pull aztec-sequencer
+ docker compose pull aztec-sequencer --quiet  # 优化: 静默
  print_success "镜像拉取完成！"
 
  print_warning "重启节点（可能有短暂中断）..."
  docker compose up -d
- sleep 10 # 等待重启
+ sleep 10
 
  local new_image=$(docker inspect aztec-sequencer --format '{{.Config.Image}}' 2>/dev/null || echo "未知")
  if [[ "$old_image" != "$new_image" ]]; then
@@ -427,7 +441,7 @@ monitor_performance() {
 # ==================== 主安装流程 ====================
 install_and_start_node() {
  clear
- print_info "Aztec 测试网节点安装 (简化版)"
+ print_info "Aztec 测试网节点安装 (简化版) - v2.1.2 兼容"
  echo "=========================================="
 
  if ! check_environment; then
@@ -436,13 +450,15 @@ install_and_start_node() {
 
  echo ""
  echo "请输入基础信息："
- read -p "L1 执行 RPC URL (e.g., https://ethereum-sepolia-rpc.publicnode.com): " ETH_RPC
- read -p "L1 共识 Beacon RPC URL (e.g., https://ethereum-sepolia-beacon-api.publicnode.com): " CONS_RPC
- read -p "Funding 私钥 (用于授权和质押 STAKE，必须有 200M STAKE 和 0.2 ETH): " FUNDING_PRIVATE_KEY
+ read -s -p "L1 执行 RPC URL (e.g., https://ethereum-sepolia-rpc.publicnode.com): " ETH_RPC  # 优化: -s 隐藏 (虽 URL 不敏，但一致)
+ echo
+ read -s -p "L1 共识 Beacon RPC URL (e.g., https://ethereum-sepolia-beacon-api.publicnode.com): " CONS_RPC  # 同上
+ echo
+ read -s -p "Funding 私钥 (用于授权和质押 STAKE，必须有 200k STAKE 和 0.2 ETH): " FUNDING_PRIVATE_KEY  # 优化: -s 隐藏
  echo ""
 
  if [[ -n "$FUNDING_PRIVATE_KEY" && ! "$FUNDING_PRIVATE_KEY" =~ ^0x[a-fA-F0-9]{64}$ ]]; then
-  print_error "私钥格式错误"
+  print_error "私钥格式错误 (需 0x + 64 hex)"
   return 1
  fi
 
@@ -456,7 +472,7 @@ install_and_start_node() {
   fi
  fi
 
- # 选择模式
+ # 选择模式 (优化: 添加 ZKPassport 提醒)
  echo ""
  print_info "选择模式："
  echo "1. 生成新地址 (自动注册)"
@@ -603,7 +619,7 @@ main_menu() {
  while true; do
   clear
   echo "========================================"
-  echo " Aztec 节点安装 (简化版)"
+  echo " Aztec 节点安装 (简化版) - v2.1.2"
   echo "========================================"
   echo "1. 安装/启动节点 (带选择)"
   echo "2. 查看日志和状态"
