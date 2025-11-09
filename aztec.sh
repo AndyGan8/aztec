@@ -454,7 +454,7 @@ install_and_start_node() {
  echo
  read -p "L1 共识 Beacon RPC URL (e.g., https://ethereum-sepolia-beacon-api.publicnode.com): " CONS_RPC
  echo
- read -s -p "Funding 私钥 (用于授权和质押 STAKE，必须有 200k STAKE 和 0.2 ETH): " FUNDING_PRIVATE_KEY
+ read -p "Funding 私钥 (用于授权和质押 STAKE，必须有 200k STAKE 和 0.2 ETH): " FUNDING_PRIVATE_KEY
  echo ""
 
  if [[ -n "$FUNDING_PRIVATE_KEY" && ! "$FUNDING_PRIVATE_KEY" =~ ^0x[a-fA-F0-9]{64}$ ]]; then
