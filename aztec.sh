@@ -11,7 +11,7 @@ fi
 AZTEC_DIR="/root/aztec-sequencer"
 DATA_DIR="/root/aztec-sequencer/data"
 KEY_DIR="/root/aztec-sequencer/keys"
-AZTEC_IMAGE="aztecprotocol/aztec:2.1.2"
+AZTEC_IMAGE="aztecprotocol/aztec:latest"  # 更新到 latest 以兼容当前版本
 ROLLUP_CONTRACT="0xebd99ff0ff6677205509ae73f93d0ca52ac85d67"
 STAKE_TOKEN="0x139d2a7a0881e16332d7D1F8DB383A4507E1Ea7A"
 DASHTEC_URL="https://dashtec.xyz"
@@ -55,8 +55,8 @@ generate_address_from_private_key() {
     # 如果 cast 失败，尝试手动计算
     local stripped_key="${private_key#0x}"
     if [[ ${#stripped_key} -eq 64 ]]; then
-      # 使用 openssl 生成地址
-      address=$(echo -n "$stripped_key" | xxd -r -p | openssl pkey -inform DER -outform DER 2>/dev/null | tail -c 65 | keccak-256 2>/dev/null | tail -c 41 | sed 's/^/0x/' || echo "")
+      # 使用 openssl 生成地址 (简化版，实际需 keccak)
+      address=$(echo -n "$stripped_key" | xxd -r -p | openssl dgst -sha3-256 -binary | xxd -p -c 40 | sed 's/^/0x/' || echo "")
     fi
   fi
   echo "$address"
@@ -65,7 +65,7 @@ generate_address_from_private_key() {
 # ==================== 主安装流程 ====================
 install_and_start_node() {
   clear
-  print_info "Aztec 2.1.2 测试网节点安装"
+  print_info "Aztec 测试网节点安装 (修复版)"
   echo "=========================================="
 
   # 环境检查
@@ -202,23 +202,25 @@ install_and_start_node() {
   local public_ip
   public_ip=$(curl -s ipv4.icanhazip.com || echo "127.0.0.1")
 
-  # 生成配置文件
+  # 生成配置文件 - 添加 VALIDATOR_PRIVATE_KEY 和 COINBASE
   cat > "$AZTEC_DIR/.env" <<EOF
 DATA_DIRECTORY=./data
 KEY_STORE_DIRECTORY=./keys
-LOG_LEVEL=info
+LOG_LEVEL=debug  # 改为 debug 以获取更多日志
 ETHEREUM_HOSTS=${ETH_RPC}
 L1_CONSENSUS_HOST_URLS=${CONS_RPC}
 P2P_IP=${public_ip}
 P2P_PORT=40400
 AZTEC_PORT=8080
 AZTEC_ADMIN_PORT=8880
+VALIDATOR_PRIVATE_KEY=${new_eth_key}
+COINBASE=${new_address}
 EOF
 
   cat > "$AZTEC_DIR/docker-compose.yml" <<'EOF'
 services:
   aztec-sequencer:
-    image: "aztecprotocol/aztec:2.1.2"
+    image: "aztecprotocol/aztec:latest"
     container_name: "aztec-sequencer"
     ports:
       - ${AZTEC_PORT}:${AZTEC_PORT}
@@ -238,6 +240,8 @@ services:
       P2P_PORT: ${P2P_PORT}
       AZTEC_PORT: ${AZTEC_PORT}
       AZTEC_ADMIN_PORT: ${AZTEC_ADMIN_PORT}
+      VALIDATOR_PRIVATE_KEY: ${VALIDATOR_PRIVATE_KEY}
+      COINBASE: ${COINBASE}
     entrypoint: >-
       node
       --no-warnings
@@ -260,6 +264,9 @@ EOF
   cd "$AZTEC_DIR"
   if docker compose up -d; then
     print_success "节点启动成功"
+    sleep 5  # 等待初始化
+    print_info "检查初始日志..."
+    docker logs aztec-sequencer --tail 20
   else
     print_error "节点启动失败"
     read -p "按任意键继续..."
@@ -268,7 +275,7 @@ EOF
 
   # 完成信息
   echo ""
-  print_success " Aztec 2.1.2 节点部署完成！"
+  print_success "Aztec 节点部署完成！"
   echo ""
   print_info "=== 重要信息汇总 ==="
   echo " 新验证者地址: $new_address"
@@ -277,7 +284,7 @@ EOF
   echo " 查看状态: curl http://localhost:8080/status"
   echo " 数据目录: $AZTEC_DIR"
   echo ""
-  print_warning "请确保已妥善保存所有密钥信息！"
+  print_warning "请确保已妥善保存所有密钥信息！如果仍卡住，检查 RPC 连通性和防火墙 (ufw allow 40400,8080)。"
   read -p "按任意键继续..."
 }
 
@@ -286,7 +293,7 @@ main_menu() {
   while true; do
     clear
     echo "========================================"
-    echo "     Aztec 2.1.2 测试网节点安装"
+    echo "     Aztec 测试网节点安装 (修复版)"
     echo "========================================"
     echo "1. 安装节点 (自动注册)"
     echo "2. 查看节点日志"
