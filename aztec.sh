@@ -54,7 +54,7 @@ install_dependencies() {
 
  # 安装基础包
  print_info "安装基础工具 (jq, curl 等)..."
- apt install -y curl jq iptables build-essential git wget lz4 make gcc nano automake autoconf tmux htop nvme-cli libgbm1 pkg-config libssl-dev libleveldb-dev tar clang bsdmainutils ncdu unzip libleveldb-dev ca-certificates gnupg lsb-release bc net-tools  # 添加 net-tools 用于 netstat
+ apt install -y curl jq iptables build-essential git wget lz4 make gcc nano automake autoconf tmux htop nvme-cli libgbm1 pkg-config libssl-dev libleveldb-dev tar clang bsdmainutils ncdu unzip libleveldb-dev ca-certificates gnupg lsb-release bc net-tools
 
  # 安装 Docker（如果缺失）
  if ! command -v docker >/dev/null 2>&1; then
@@ -424,162 +424,6 @@ monitor_performance() {
  done
 }
 
-# ==================== 启用监控仪表盘 (Grafana + Prometheus) ====================
-enable_monitoring_dashboard() {
- if [ ! -d "$AZTEC_DIR" ]; then
-  print_error "节点目录不存在，请先安装节点！"
-  read -p "按 [Enter] 继续..."
-  return 1
- fi
-
- cd "$AZTEC_DIR"
-
- # 检查端口占用
- check_port() {
-  local port=$1
-  if netstat -tuln 2>/dev/null | grep -q ":$port "; then
-   echo "占用"
-  else
-   echo "可用"
-  fi
- }
-
- local grafana_port=3000
- local prometheus_port=9090
-
- print_info "检查端口可用性..."
- if [[ $(check_port $grafana_port) == "占用" ]]; then
-  print_warning "端口 $grafana_port (Grafana) 已占用！"
-  print_info "占用进程: $(lsof -i :$grafana_port 2>/dev/null | awk 'NR>1 {print $2}' | head -1 || echo "未知")"
-  read -p "是否杀掉进程并继续? (y/N): " kill_choice
-  if [[ "$kill_choice" == "y" || "$kill_choice" == "Y" ]]; then
-   local pid=$(lsof -t -i :$grafana_port 2>/dev/null || echo "")
-   if [[ -n "$pid" ]]; then
-    kill -9 $pid
-    sleep 2
-    print_success "进程已杀掉"
-   else
-    print_warning "无法自动杀进程，请手动: sudo lsof -t -i :$grafana_port | xargs sudo kill -9"
-    read -p "确认端口释放后按 [Enter]..."
-   fi
-  else
-   read -p "输入新 Grafana 端口 (默认 3001): " new_port
-   grafana_port=${new_port:-3001}
-   print_warning "使用端口 $grafana_port"
-  fi
- fi
-
- if [[ $(check_port $prometheus_port) == "占用" ]]; then
-  print_warning "端口 $prometheus_port (Prometheus) 已占用！"
-  read -p "是否继续? (假设手动处理): " confirm
-  [[ "$confirm" != "y" && "$confirm" != "Y" ]] && return 1
- fi
-
- cat > prometheus.yml <<EOF
-global:
- scrape_interval: 15s
-scrape_configs:
- - job_name: 'aztec-node'
- static_configs:
- - targets: ['aztec-sequencer:8080']
- - job_name: 'docker'
- static_configs:
- - targets: ['host.docker.internal:9323']
-EOF
-
- cat > docker-compose.yml <<EOF
-services:
- aztec-sequencer:
-  image: "aztecprotocol/aztec:latest"
-  container_name: "aztec-sequencer"
-  ports:
-   - ${AZTEC_PORT}:${AZTEC_PORT}
-   - ${AZTEC_ADMIN_PORT}:${AZTEC_ADMIN_PORT}
-   - ${P2P_PORT}:${P2P_PORT}
-   - ${P2P_PORT}:${P2P_PORT}/udp
-  volumes:
-   - ${DATA_DIRECTORY}:/var/lib/data
-   - ${KEY_STORE_DIRECTORY}:/var/lib/keystore
-  environment:
-   KEY_STORE_DIRECTORY: /var/lib/keystore
-   DATA_DIRECTORY: /var/lib/data
-   LOG_LEVEL: ${LOG_LEVEL}
-   ETHEREUM_HOSTS: ${ETHEREUM_HOSTS}
-   L1_CONSENSUS_HOST_URLS: ${L1_CONSENSUS_HOST_URLS}
-   P2P_IP: ${P2P_IP}
-   P2P_PORT: ${P2P_PORT}
-   AZTEC_PORT: ${AZTEC_PORT}
-   AZTEC_ADMIN_PORT: ${AZTEC_ADMIN_PORT}
-   VALIDATOR_PRIVATE_KEY: ${VALIDATOR_PRIVATE_KEY}
-   COINBASE: ${COINBASE}
-  entrypoint: >-
-   node
-   --no-warnings
-   /usr/src/yarn-project/aztec/dest/bin/index.js
-   start
-   --node
-   --archiver
-   --sequencer
-   --network testnet
-  networks:
-   - aztec
-  restart: always
-
- prometheus:
-  image: prom/prometheus:latest
-  container_name: "prometheus"
-  ports:
-   - "${prometheus_port}:9090"
-  volumes:
-   - ./prometheus.yml:/etc/prometheus/prometheus.yml
-  command: --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/prometheus
-  networks:
-   - aztec
-  restart: always
-
- grafana:
-  image: grafana/grafana:latest
-  container_name: "grafana"
-  ports:
-   - "${grafana_port}:3000"
-  volumes:
-   - grafana-data:/var/lib/grafana
-  environment:
-   - GF_SECURITY_ADMIN_PASSWORD=admin
-   - GF_USERS_ALLOW_SIGN_UP=false
-  depends_on:
-   - prometheus
-  networks:
-   - aztec
-  restart: always
-
-volumes:
- grafana-data:
-
-networks:
- aztec:
-  name: aztec
-EOF
-
- print_success "监控配置文件生成完成！(Grafana 端口: $grafana_port)"
-
- print_info "启动监控栈（Prometheus + Grafana）..."
- docker compose up -d prometheus grafana
- sleep 10
-
- if docker ps | grep -q grafana; then
-  print_success "Grafana 启动成功！访问 http://localhost:${grafana_port} (用户: admin, 密码: admin)"
-  print_warning "首次登录后，配置数据源: Prometheus URL = http://prometheus:${prometheus_port}"
-  print_info "导入仪表盘: Dashboards > Import > ID 1860 (Docker) 或 193 (Node.js)，添加 Aztec metrics。"
-  echo "监控指标示例: CPU/内存 (cAdvisor), P2P peers (Aztec /metrics)。"
- else
-  print_error "Grafana 启动失败，检查日志: docker logs grafana"
-  docker logs grafana --tail 20
- fi
-
- read -p "按 [Enter] 继续..."
-}
-
 # ==================== 主安装流程 ====================
 install_and_start_node() {
  clear
@@ -695,8 +539,7 @@ VALIDATOR_PRIVATE_KEY=${new_eth_key}
 COINBASE=${new_address}
 EOF
 
- # 使用修复后的 docker-compose.yml（包含监控），但默认不启动监控服务
- cat > "$AZTEC_DIR/docker-compose.base.yml" <<EOF
+ cat > "$AZTEC_DIR/docker-compose.yml" <<EOF
 services:
  aztec-sequencer:
   image: "aztecprotocol/aztec:latest"
@@ -739,10 +582,10 @@ networks:
   name: aztec
 EOF
 
- # 启动（仅 Aztec）
+ # 启动
  print_info "启动节点..."
  cd "$AZTEC_DIR"
- docker compose -f docker-compose.base.yml up -d
+ docker compose up -d
  sleep 5
  docker logs aztec-sequencer --tail 20
 
@@ -766,16 +609,14 @@ main_menu() {
   echo "2. 查看日志和状态"
   echo "3. 更新并重启节点"
   echo "4. 性能监控"
-  echo "5. 启用/查看监控仪表盘 (Grafana)"
-  echo "6. 退出"
+  echo "5. 退出"
   read -p "选择: " choice
   case $choice in
   1) install_and_start_node ;;
   2) view_logs_and_status ;;
   3) update_and_restart_node ;;
   4) monitor_performance ;;
-  5) enable_monitoring_dashboard ;;
-  6) exit 0 ;;
+  5) exit 0 ;;
   *) echo "无效"; read -p "继续...";;
   esac
  done
