@@ -62,10 +62,58 @@ generate_address_from_private_key() {
   echo "$address"
 }
 
+# ==================== 检查 STAKE 授权 ====================
+check_and_approve_stake() {
+  local eth_rpc=$1
+  local old_private_key=$2
+  local old_address=$3
+  local stake_amount=200000000000000000000000000  # 200k ether in wei
+
+  print_info "检查 STAKE 授权..."
+  local allowance
+  allowance=$(cast call "$STAKE_TOKEN" "allowance(address,address)(uint256)" "$old_address" "$ROLLUP_CONTRACT" --rpc-url "$eth_rpc" 2>/dev/null || echo "0")
+  if [[ "$allowance" -ge "$stake_amount" ]]; then
+    print_success "STAKE 已授权 (当前: $((allowance / 1000000000000000000))k)"
+    return 0
+  fi
+
+  print_warning "STAKE 未授权或不足，执行授权..."
+  if ! cast send "$STAKE_TOKEN" "approve(address,uint256)" \
+    "$ROLLUP_CONTRACT" "$stake_amount" \
+    --private-key "$old_private_key" --rpc-url "$eth_rpc"; then
+    print_error "STAKE 授权失败！请检查："
+    echo "1. 私钥是否正确"
+    echo "2. 地址是否有 200k STAKE"
+    echo "3. RPC 是否可用"
+    read -p "按任意键继续..."
+    return 1
+  fi
+  print_success "STAKE 授权成功"
+  return 0
+}
+
+# ==================== 检查 ETH 余额 ====================
+check_eth_balance() {
+  local eth_rpc=$1
+  local address=$2
+  local min_eth=0.2  # 最小 0.2 ETH
+
+  local balance_wei
+  balance_wei=$(cast call --rpc-url "$eth_rpc" "$address" "balanceOf(address)(uint256)" || echo "0")
+  local balance_eth=$((balance_wei / 1000000000000000000))
+  if [[ "$balance_eth" -ge "$min_eth" ]]; then
+    print_success "ETH 余额充足 ($balance_eth ETH)"
+    return 0
+  else
+    print_warning "ETH 余额不足 ($balance_eth ETH < $min_eth ETH)"
+    return 1
+  fi
+}
+
 # ==================== 主安装流程 ====================
 install_and_start_node() {
   clear
-  print_info "Aztec 测试网节点安装 (修复版)"
+  print_info "Aztec 测试网节点安装 (带地址选择版)"
   echo "=========================================="
 
   # 环境检查
@@ -102,107 +150,166 @@ install_and_start_node() {
   fi
   print_info "旧验证者地址: $old_address"
 
-  # 生成新密钥
-  print_info "生成新的验证者密钥..."
-  rm -rf "$HOME/.aztec/keystore" 2>/dev/null || true
-  if ! aztec validator-keys new --fee-recipient 0x0000000000000000000000000000000000000000000000000000000000000000; then
-    print_error "BLS 密钥生成失败"
-    read -p "按任意键继续..."
-    return 1
-  fi
-  if [ ! -f "$KEYSTORE_FILE" ]; then
-    print_error "密钥文件未生成"
-    read -p "按任意键继续..."
-    return 1
-  fi
-
-  # 读取密钥 - 使用正确的 JSON 路径
+  # 新功能：选择地址类型
+  echo ""
+  print_info "选择运行节点的验证者地址："
+  echo "1. 生成新地址 (推荐新用户，自动注册)"
+  echo "2. 复用旧地址 (需已注册，提供旧 BLS 私钥)"
+  read -p "请选择 (1 或 2): " address_choice
   local new_eth_key new_bls_key new_address
-  new_eth_key=$(jq -r '.validators[0].attester.eth' "$KEYSTORE_FILE")
-  new_bls_key=$(jq -r '.validators[0].attester.bls' "$KEYSTORE_FILE")
 
-  # 添加错误检查
-  if [[ -z "$new_eth_key" || "$new_eth_key" == "null" ]]; then
-    print_error "ETH 私钥读取失败，检查 JSON 结构"
-    cat "$KEYSTORE_FILE"  # 打印文件内容用于调试
+  if [[ "$address_choice" == "1" ]]; then
+    # 选项1: 生成新密钥
+    print_info "生成新的验证者密钥..."
+    rm -rf "$HOME/.aztec/keystore" 2>/dev/null || true
+    if ! aztec validator-keys new --fee-recipient 0x0000000000000000000000000000000000000000000000000000000000000000; then
+      print_error "BLS 密钥生成失败"
+      read -p "按任意键继续..."
+      return 1
+    fi
+    if [ ! -f "$KEYSTORE_FILE" ]; then
+      print_error "密钥文件未生成"
+      read -p "按任意键继续..."
+      return 1
+    fi
+
+    # 读取密钥
+    new_eth_key=$(jq -r '.validators[0].attester.eth' "$KEYSTORE_FILE")
+    new_bls_key=$(jq -r '.validators[0].attester.bls' "$KEYSTORE_FILE")
+
+    # 添加错误检查
+    if [[ -z "$new_eth_key" || "$new_eth_key" == "null" ]]; then
+      print_error "ETH 私钥读取失败，检查 JSON 结构"
+      cat "$KEYSTORE_FILE"  # 打印文件内容用于调试
+      read -p "按任意键继续..."
+      return 1
+    fi
+    if [[ -z "$new_bls_key" || "$new_bls_key" == "null" ]]; then
+      print_error "BLS 私钥读取失败"
+      read -p "按任意键继续..."
+      return 1
+    fi
+
+    # 生成新地址
+    new_address=$(generate_address_from_private_key "$new_eth_key")
+    if [[ -z "$new_address" || ! "$new_address" =~ ^0x[a-fA-F0-9]{40}$ ]]; then
+      print_error "新地址生成失败"
+      echo "ETH 私钥: $new_eth_key"
+      read -p "按任意键继续..."
+      return 1
+    fi
+    print_success "新验证者地址: $new_address"
+
+    # 显示密钥信息
+    echo ""
+    print_warning "=== 请立即保存以下密钥信息！ ==="
+    echo "=========================================="
+    echo " 新的以太坊私钥: $new_eth_key"
+    echo " 新的 BLS 私钥: $new_bls_key"
+    echo " 新的公钥地址: $new_address"
+    echo "=========================================="
+    read -p "确认已保存所有密钥信息后按 [Enter] 继续..."
+
+    # STAKE 授权 (用旧私钥)
+    if ! check_and_approve_stake "$ETH_RPC" "$OLD_PRIVATE_KEY" "$old_address"; then
+      return 1
+    fi
+
+    # 资金提示 (新地址)
+    echo ""
+    print_warning "=== 重要：请向新地址转入 Sepolia ETH ==="
+    echo "转账地址: $new_address"
+    echo "推荐金额: 0.2-0.5 ETH"
+    echo ""
+    print_info "可以使用以下命令转账："
+    echo "cast send $new_address --value 0.3ether --private-key $OLD_PRIVATE_KEY --rpc-url $ETH_RPC"
+    echo ""
+    read -p "确认已完成转账后按 [Enter] 继续..."
+
+    # 注册验证者
+    print_info "注册新验证者到测试网..."
+    if ! aztec add-l1-validator \
+      --l1-rpc-urls "$ETH_RPC" \
+      --network testnet \
+      --private-key "$OLD_PRIVATE_KEY" \
+      --attester "$new_address" \
+      --withdrawer "$new_address" \
+      --bls-secret-key "$new_bls_key" \
+      --rollup "$ROLLUP_CONTRACT"; then
+      print_error "验证者注册失败"
+      read -p "按任意键继续..."
+      return 1
+    fi
+    print_success "新验证者注册成功"
+
+  elif [[ "$address_choice" == "2" ]]; then
+    # 选项2: 复用旧地址
+    echo "请输入旧 BLS 私钥 (从之前 keystore.json 获取): "
+    read -p "旧 BLS 私钥: " OLD_BLS_KEY
+    if [[ -z "$OLD_BLS_KEY" ]]; then
+      print_error "BLS 私钥不能为空"
+      read -p "按任意键继续..."
+      return 1
+    fi
+
+    new_eth_key="$OLD_PRIVATE_KEY"  # 复用旧 ETH 私钥
+    new_bls_key="$OLD_BLS_KEY"
+    new_address="$old_address"
+    print_success "使用现有验证者地址: $new_address"
+
+    # 检查是否已注册 (简单提示，用 Dashtec 查询)
+    echo ""
+    print_info "请手动确认旧地址已注册: $DASHTEC_URL/validator/$new_address"
+    read -p "确认已注册后按 [Enter] 继续..."
+
+    # STAKE 授权 (用旧私钥/地址)
+    if ! check_and_approve_stake "$ETH_RPC" "$OLD_PRIVATE_KEY" "$old_address"; then
+      return 1
+    fi
+
+    # 资金检查 (旧地址)
+    if ! check_eth_balance "$ETH_RPC" "$new_address"; then
+      echo ""
+      print_warning "=== ETH 余额不足，请向旧地址转入 Sepolia ETH ==="
+      echo "转账地址: $new_address"
+      echo "推荐金额: 0.2-0.5 ETH"
+      echo ""
+      print_info "可以使用以下命令转账："
+      echo "cast send $new_address --value 0.3ether --private-key $OLD_PRIVATE_KEY --rpc-url $ETH_RPC"
+      echo ""
+      read -p "确认已完成转账后按 [Enter] 继续..."
+    fi
+
+    # 跳过注册
+    print_success "复用旧验证者，跳过注册步骤"
+
+    # 显示密钥信息 (提醒备份)
+    echo ""
+    print_warning "=== 请确认已保存旧密钥信息！ ==="
+    echo "=========================================="
+    echo " 以太坊私钥: $new_eth_key"
+    echo " BLS 私钥: $new_bls_key"
+    echo " 公钥地址: $new_address"
+    echo "=========================================="
+    read -p "确认后按 [Enter] 继续..."
+
+  else
+    print_error "无效选择，请选 1 或 2"
     read -p "按任意键继续..."
     return 1
   fi
-  if [[ -z "$new_bls_key" || "$new_bls_key" == "null" ]]; then
-    print_error "BLS 私钥读取失败"
-    read -p "按任意键继续..."
-    return 1
-  fi
 
-  # 生成新地址
-  new_address=$(generate_address_from_private_key "$new_eth_key")
-  if [[ -z "$new_address" || ! "$new_address" =~ ^0x[a-fA-F0-9]{40}$ ]]; then
-    print_error "新地址生成失败"
-    echo "ETH 私钥: $new_eth_key"
-    read -p "按任意键继续..."
-    return 1
-  fi
-  print_success "新验证者地址: $new_address"
-
-  # 显示密钥信息
-  echo ""
-  print_warning "=== 请立即保存以下密钥信息！ ==="
-  echo "=========================================="
-  echo " 新的以太坊私钥: $new_eth_key"
-  echo " 新的 BLS 私钥: $new_bls_key"
-  echo " 新的公钥地址: $new_address"
-  echo "=========================================="
-  read -p "确认已保存所有密钥信息后按 [Enter] 继续..."
-
-  # STAKE 授权
-  print_info "执行 STAKE 授权..."
-  if ! cast send "$STAKE_TOKEN" "approve(address,uint256)" \
-    "$ROLLUP_CONTRACT" "200000ether" \
-    --private-key "$OLD_PRIVATE_KEY" --rpc-url "$ETH_RPC"; then
-    print_error "STAKE 授权失败！请检查："
-    echo "1. 私钥是否正确"
-    echo "2. 地址是否有 200k STAKE"
-    echo "3. RPC 是否可用"
-    read -p "按任意键继续..."
-    return 1
-  fi
-  print_success "STAKE 授权成功"
-
-  # 资金提示
-  echo ""
-  print_warning "=== 重要：请向新地址转入 Sepolia ETH ==="
-  echo "转账地址: $new_address"
-  echo "推荐金额: 0.2-0.5 ETH"
-  echo ""
-  print_info "可以使用以下命令转账："
-  echo "cast send $new_address --value 0.3ether --private-key $OLD_PRIVATE_KEY --rpc-url $ETH_RPC"
-  echo ""
-  read -p "确认已完成转账后按 [Enter] 继续..."
-
-  # 注册验证者
-  print_info "注册验证者到测试网..."
-  if ! aztec add-l1-validator \
-    --l1-rpc-urls "$ETH_RPC" \
-    --network testnet \
-    --private-key "$OLD_PRIVATE_KEY" \
-    --attester "$new_address" \
-    --withdrawer "$new_address" \
-    --bls-secret-key "$new_bls_key" \
-    --rollup "$ROLLUP_CONTRACT"; then
-    print_error "验证者注册失败"
-    read -p "按任意键继续..."
-    return 1
-  fi
-  print_success "验证者注册成功"
-
-  # 设置节点环境
+  # 设置节点环境 (统一逻辑)
   print_info "设置节点环境..."
   mkdir -p "$AZTEC_DIR" "$DATA_DIR" "$KEY_DIR"
-  cp "$KEYSTORE_FILE" "$KEY_DIR/keystore.json"
+  # 对于选项2，不复制新 keystore，但节点用 env 中的密钥运行
+  if [[ "$address_choice" == "1" ]]; then
+    cp "$KEYSTORE_FILE" "$KEY_DIR/keystore.json"
+  fi
   local public_ip
   public_ip=$(curl -s ipv4.icanhazip.com || echo "127.0.0.1")
 
-  # 生成配置文件 - 添加 VALIDATOR_PRIVATE_KEY 和 COINBASE
+  # 生成配置文件
   cat > "$AZTEC_DIR/.env" <<EOF
 DATA_DIRECTORY=./data
 KEY_STORE_DIRECTORY=./keys
@@ -278,7 +385,7 @@ EOF
   print_success "Aztec 节点部署完成！"
   echo ""
   print_info "=== 重要信息汇总 ==="
-  echo " 新验证者地址: $new_address"
+  echo " 验证者地址: $new_address"
   echo " 排队查询: $DASHTEC_URL/validator/$new_address"
   echo " 查看日志: docker logs -f aztec-sequencer"
   echo " 查看状态: curl http://localhost:8080/status"
@@ -293,9 +400,9 @@ main_menu() {
   while true; do
     clear
     echo "========================================"
-    echo "     Aztec 测试网节点安装 (修复版)"
+    echo "     Aztec 测试网节点安装 (带地址选择版)"
     echo "========================================"
-    echo "1. 安装节点 (自动注册)"
+    echo "1. 安装节点 (带地址选择)"
     echo "2. 查看节点日志"
     echo "3. 检查节点状态"
     echo "4. 退出"
