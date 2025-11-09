@@ -25,20 +25,103 @@ print_success() { echo -e "\033[1;32m[SUCCESS]\033[0m $1"; }
 print_error() { echo -e "\033[1;31m[ERROR]\033[0m $1"; }
 print_warning() { echo -e "\033[1;33m[WARNING]\033[0m $1"; }
 
+# ==================== 安装依赖 ====================
+install_dependencies() {
+ print_info "检测到缺失依赖，正在自动安装..."
+ 
+ # 更新系统包
+ print_info "更新系统包..."
+ apt update -y && apt upgrade -y
+
+ # 安装基础包
+ print_info "安装基础工具 (jq, curl 等)..."
+ apt install -y curl jq iptables build-essential git wget lz4 make gcc nano automake autoconf tmux htop nvme-cli libgbm1 pkg-config libssl-dev libleveldb-dev tar clang bsdmainutils ncdu unzip libleveldb-dev ca-certificates gnupg lsb-release bc
+
+ # 安装 Docker（如果缺失）
+ if ! command -v docker >/dev/null 2>&1; then
+  print_info "安装 Docker..."
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  chmod a+r /etc/apt/keyrings/docker.gpg
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+  apt-get update
+  apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
+  systemctl enable docker
+  systemctl start docker
+  usermod -aG docker root  # root 用户
+  sleep 5  # 等待 Docker 启动
+  docker run hello-world >/dev/null 2>&1 || print_warning "Docker 测试失败，请手动检查"
+  print_success "Docker 安装完成"
+ else
+  print_info "Docker 已存在，跳过"
+ fi
+
+ # 安装 Foundry（提供 cast，如果缺失）
+ if ! command -v cast >/dev/null 2>&1; then
+  print_info "安装 Foundry (包含 cast)..."
+  curl -L https://foundry.paradigm.xyz | bash
+  export PATH="$HOME/.foundry/bin:$PATH"
+  source "$HOME/.bashrc"  # 加载环境
+  foundryup
+  sleep 2
+  if command -v cast >/dev/null 2>&1; then
+   print_success "Foundry 安装完成 (cast 可用)"
+  else
+   print_error "Foundry 安装失败，请手动运行 'foundryup'"
+   read -p "按 Enter 继续 (或 Ctrl+C 退出)..."
+  fi
+ else
+  print_info "Foundry 已存在，跳过"
+ fi
+
+ # 安装 Aztec CLI（如果缺失）
+ if ! command -v aztec >/dev/null 2>&1; then
+  print_info "安装 Aztec CLI..."
+  bash -i <(curl -s https://install.aztec.network)
+  export PATH="$HOME/.aztec/bin:$PATH"
+  source "$HOME/.bashrc"  # 加载环境
+  aztec version >/dev/null 2>&1 || aztec-up  # 更新到最新
+  if command -v aztec >/dev/null 2>&1; then
+   print_success "Aztec CLI 安装完成"
+  else
+   print_error "Aztec CLI 安装失败，请手动运行安装命令"
+   read -p "按 Enter 继续 (或 Ctrl+C 退出)..."
+  fi
+ else
+  print_info "Aztec CLI 已存在，跳过"
+ fi
+
+ # 永久添加 PATH 到 .bashrc
+ echo 'export PATH="$HOME/.foundry/bin:$HOME/.aztec/bin:$PATH"' >> ~/.bashrc
+ export PATH="$HOME/.foundry/bin:$HOME/.aztec/bin:$PATH"
+
+ print_success "所有依赖安装完成！"
+}
+
 # ==================== 环境检查 ====================
 check_environment() {
  print_info "检查环境..."
- export PATH="$HOME/.foundry/bin:$PATH"
- export PATH="$HOME/.aztec/bin:$PATH"
+ export PATH="$HOME/.foundry/bin:$HOME/.aztec/bin:$PATH"
  local missing=()
  for cmd in docker jq cast aztec; do
- if ! command -v "$cmd" >/dev/null 2>&1; then
- missing+=("$cmd")
- fi
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+   missing+=("$cmd")
+  fi
  done
  if [ ${#missing[@]} -gt 0 ]; then
- print_error "缺少命令: ${missing[*]}"
- return 1
+  print_error "缺少命令: ${missing[*]}"
+  install_dependencies  # 自动安装
+  # 重新检查
+  missing=()
+  for cmd in docker jq cast aztec; do
+   if ! command -v "$cmd" >/dev/null 2>&1; then
+    missing+=("$cmd")
+   fi
+  done
+  if [ ${#missing[@]} -gt 0 ]; then
+   print_error "安装后仍缺少: ${missing[*]}，请手动修复"
+   return 1
+  fi
  fi
  print_success "环境检查通过"
  return 0
@@ -50,10 +133,10 @@ generate_address_from_private_key() {
  local address
  address=$(cast wallet address --private-key "$private_key" 2>/dev/null || echo "")
  if [[ -z "$address" || ! "$address" =~ ^0x[a-fA-F0-9]{40}$ ]]; then
- local stripped_key="${private_key#0x}"
- if [[ ${#stripped_key} -eq 64 ]]; then
- address=$(echo -n "$stripped_key" | xxd -r -p | openssl dgst -sha3-256 -binary | xxd -p -c 40 | sed 's/^/0x/' || echo "")
- fi
+  local stripped_key="${private_key#0x}"
+  if [[ ${#stripped_key} -eq 64 ]]; then
+   address=$(echo -n "$stripped_key" | xxd -r -p | openssl dgst -sha3-256 -binary | xxd -p -c 40 | sed 's/^/0x/' || echo "")
+  fi
  fi
  echo "$address"
 }
@@ -62,8 +145,8 @@ generate_address_from_private_key() {
 load_existing_keystore() {
  local keystore_path=$1
  if [ ! -f "$keystore_path" ]; then
- print_error "keystore 文件不存在: $keystore_path"
- return 1
+  print_error "keystore 文件不存在: $keystore_path"
+  return 1
  fi
 
  local new_eth_key new_bls_key new_address
@@ -71,18 +154,18 @@ load_existing_keystore() {
  new_bls_key=$(jq -r '.validators[0].attester.bls' "$keystore_path")
 
  if [[ -z "$new_eth_key" || "$new_eth_key" == "null" ]]; then
- print_error "ETH 私钥读取失败"
- return 1
+  print_error "ETH 私钥读取失败"
+  return 1
  fi
  if [[ -z "$new_bls_key" || "$new_bls_key" == "null" ]]; then
- print_error "BLS 私钥读取失败"
- return 1
+  print_error "BLS 私钥读取失败"
+  return 1
  fi
 
  new_address=$(generate_address_from_private_key "$new_eth_key")
  if [[ -z "$new_address" || ! "$new_address" =~ ^0x[a-fA-F0-9]{40}$ ]]; then
- print_error "地址生成失败"
- return 1
+  print_error "地址生成失败"
+  return 1
  fi
 
  print_success "加载成功！地址: $new_address"
@@ -94,9 +177,9 @@ load_existing_keystore() {
  # 验证地址匹配用户预期
  read -p "输入预期地址确认 (e.g., 0x345...): " expected_address
  if [[ "$new_address" != "$expected_address" ]]; then
- print_warning "地址不匹配！预期: $expected_address, 实际: $new_address "
- read -p "是否继续? (y/N): " confirm
- [[ "$confirm" != "y" && "$confirm" != "Y" ]] && return 1
+  print_warning "地址不匹配！预期: $expected_address, 实际: $new_address "
+  read -p "是否继续? (y/N): " confirm
+  [[ "$confirm" != "y" && "$confirm" != "Y" ]] && return 1
  fi
 
  # 设置全局变量
@@ -118,16 +201,16 @@ check_and_approve_stake() {
  local allowance
  allowance=$(cast call "$STAKE_TOKEN" "allowance(address,address)(uint256)" "$old_address" "$ROLLUP_CONTRACT" --rpc-url "$eth_rpc" 2>/dev/null || echo "0")
  if [[ "$allowance" -ge "$stake_amount" ]]; then
- print_success "STAKE 已授权"
- return 0
+  print_success "STAKE 已授权"
+  return 0
  fi
 
  print_warning "执行授权..."
  if ! cast send "$STAKE_TOKEN" "approve(address,uint256)" \
- "$ROLLUP_CONTRACT" "$stake_amount" \
- --private-key "$old_private_key" --rpc-url "$eth_rpc"; then
- print_error "授权失败"
- return 1
+  "$ROLLUP_CONTRACT" "$stake_amount" \
+  --private-key "$old_private_key" --rpc-url "$eth_rpc"; then
+  print_error "授权失败"
+  return 1
  fi
  print_success "授权成功"
  return 0
@@ -142,20 +225,20 @@ check_eth_balance() {
  local balance_eth
  balance_eth=$(cast balance "$address" --rpc-url "$eth_rpc" | sed 's/.* \([0-9.]*\) eth.*/\1/' || echo "0")
  if [[ $(echo "$balance_eth >= $min_eth" | bc -l 2>/dev/null || echo "0") -eq 1 ]]; then
- print_success "ETH 充足 ($balance_eth ETH)"
- return 0
+  print_success "ETH 充足 ($balance_eth ETH)"
+  return 0
  else
- print_warning "ETH 不足 ($balance_eth ETH)"
- return 1
+  print_warning "ETH 不足 ($balance_eth ETH)"
+  return 1
  fi
 }
 
 # ==================== 更新并重启节点 ====================
 update_and_restart_node() {
  if [ ! -d "$AZTEC_DIR" ]; then
- print_error "节点目录不存在，请先安装节点！"
- read -p "按 [Enter] 继续..."
- return 1
+  print_error "节点目录不存在，请先安装节点！"
+  read -p "按 [Enter] 继续..."
+  return 1
  fi
 
  print_info "检查并拉取最新 Aztec 镜像..."
@@ -172,9 +255,9 @@ update_and_restart_node() {
 
  local new_image=$(docker inspect aztec-sequencer --format '{{.Config.Image}}' 2>/dev/null || echo "未知")
  if [[ "$old_image" != "$new_image" ]]; then
- print_success "更新成功！新镜像: $new_image"
+  print_success "更新成功！新镜像: $new_image"
  else
- print_info "无新版本可用。"
+  print_info "无新版本可用。"
  fi
 
  print_info "重启后日志（最近20行）："
@@ -188,38 +271,38 @@ update_and_restart_node() {
 # ==================== 查看日志和状态 ====================
 view_logs_and_status() {
  if docker ps | grep -q aztec-sequencer; then
- echo "节点运行中"
- docker logs --tail 100 aztec-sequencer
- echo ""
- local api_status=$(curl -s http://localhost:8080/status 2>/dev/null || echo "")
- if [[ -n "$api_status" && $(echo "$api_status" | jq -e '.error == null' 2>/dev/null) == "true" ]]; then
- echo "$api_status"
- print_success "API 响应正常！"
- else
- echo "$api_status"
- print_error "API 响应异常或无响应！"
- fi
+  echo "节点运行中"
+  docker logs --tail 100 aztec-sequencer
+  echo ""
+  local api_status=$(curl -s http://localhost:8080/status 2>/dev/null || echo "")
+  if [[ -n "$api_status" && $(echo "$api_status" | jq -e '.error == null' 2>/dev/null) == "true" ]]; then
+   echo "$api_status"
+   print_success "API 响应正常！"
+  else
+   echo "$api_status"
+   print_error "API 响应异常或无响应！"
+  fi
 
- # 更精确的日志错误检测：针对Aztec常见问题，如连接失败、同步错误、P2P问题
- # 排除正常日志（如"no blocks"、"too far into slot"、"rate limit"）
- local error_logs=$(docker logs --tail 100 aztec-sequencer 2>/dev/null | grep -E "(ERROR|WARN|FATAL|failed to|connection refused|timeout|sync failed|RPC error|P2P error|disconnected.*failed)" | grep -v -E "(no blocks|too far into slot|rate limit exceeded|yamux error)")
- local error_count=$(echo "$ error_logs" | wc -l)
- if [[ "$error_count" -eq 0 ]]; then
- print_success "日志正常，无明显错误！（P2P活跃，同步稳定）"
- else
- print_warning "日志中发现 $error_count 条潜在问题 (如连接/同步失败)，详情："
- echo "$error_logs"
- fi
+  # 更精确的日志错误检测：针对Aztec常见问题，如连接失败、同步错误、P2P问题
+  # 排除正常日志（如"no blocks"、"too far into slot"、"rate limit"）
+  local error_logs=$(docker logs --tail 100 aztec-sequencer 2>/dev/null | grep -E "(ERROR|WARN|FATAL|failed to|connection refused|timeout|sync failed|RPC error|P2P error|disconnected.*failed)" | grep -v -E "(no blocks|too far into slot|rate limit exceeded|yamux error)")
+  local error_count=$(echo "$error_logs" | wc -l)
+  if [[ "$error_count" -eq 0 ]]; then
+   print_success "日志正常，无明显错误！（P2P活跃，同步稳定）"
+  else
+   print_warning "日志中发现 $error_count 条潜在问题 (如连接/同步失败)，详情："
+   echo "$error_logs"
+  fi
 
- echo ""
- print_info "是否查看实时日志？(y/N): "
- read -r realtime_choice
- if [[ "$realtime_choice" == "y" || "$realtime_choice" == "Y" ]]; then
- print_info "实时日志（按 Ctrl+C 停止）..."
- docker logs -f aztec-sequencer
- fi
+  echo ""
+  print_info "是否查看实时日志？(y/N): "
+  read -r realtime_choice
+  if [[ "$realtime_choice" == "y" || "$realtime_choice" == "Y" ]]; then
+   print_info "实时日志（按 Ctrl+C 停止）..."
+   docker logs -f aztec-sequencer
+  fi
  else
- print_error "节点未运行！"
+  print_error "节点未运行！"
  fi
  read -p "按 [Enter] 继续..."
 }
@@ -227,9 +310,9 @@ view_logs_and_status() {
 # ==================== 性能监控 ====================
 monitor_performance() {
  if [ ! -d "$AZTEC_DIR" ]; then
- print_error "节点目录不存在，请先安装节点！"
- read -p "按 [Enter] 继续..."
- return 1
+  print_error "节点目录不存在，请先安装节点！"
+  read -p "按 [Enter] 继续..."
+  return 1
  fi
 
  print_info "=== 系统性能监控 ==="
@@ -240,13 +323,13 @@ monitor_performance() {
  echo "网络 I/O (最近1min): $(cat /proc/net/dev | grep eth0 | awk '{print "接收: " $2/1024/1024 "MB, 发送: " $10/1024/1024 "MB"}' 2>/dev/null || echo "网络接口未找到")"
 
  if docker ps | grep -q aztec-sequencer; then
- print_info "=== Aztec 容器性能 ==="
- docker stats aztec-sequencer --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}" | tail -n1
- print_info "Aztec API 响应时间 (ms): $(curl -s -w "%{time_total}" -o /dev/null http://localhost:8080/status 2>/dev/null || echo "N/A")"
- local peers=$(curl -s http://localhost:8080/status 2>/dev/null | jq -r '.peers // empty' || echo "N/A")
- echo "P2P 连接数: $peers"
+  print_info "=== Aztec 容器性能 ==="
+  docker stats aztec-sequencer --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}" | tail -n1
+  print_info "Aztec API 响应时间 (ms): $(curl -s -w "%{time_total}" -o /dev/null http://localhost:8080/status 2>/dev/null || echo "N/A")"
+  local peers=$(curl -s http://localhost:8080/status 2>/dev/null | jq -r '.peers // empty' || echo "N/A")
+  echo "P2P 连接数: $peers"
  else
- print_warning "Aztec 容器未运行，无法监控容器指标。"
+  print_warning "Aztec 容器未运行，无法监控容器指标。"
  fi
 
  echo ""
@@ -255,18 +338,18 @@ monitor_performance() {
  interval=${interval:-5}
  print_warning "实时监控（按 Ctrl+C 停止）... (每 $interval s 更新)"
  while true; do
- clear
- monitor_performance # 注意：这会递归调用，实际使用时可优化为循环内部执行命令
- sleep "$interval"
+  clear
+  monitor_performance # 注意：这会递归调用，实际使用时可优化为循环内部执行命令
+  sleep "$interval"
  done
 }
 
 # ==================== 启用监控仪表盘 (Grafana + Prometheus) ====================
 enable_monitoring_dashboard() {
  if [ ! -d "$AZTEC_DIR" ]; then
- print_error "节点目录不存在，请先安装节点！"
- read -p "按 [Enter] 继续..."
- return 1
+  print_error "节点目录不存在，请先安装节点！"
+  read -p "按 [Enter] 继续..."
+  return 1
  fi
 
  cd "$AZTEC_DIR"
@@ -366,12 +449,12 @@ EOF
  sleep 10
 
  if docker ps | grep -q grafana; then
- print_success "Grafana 启动成功！访问 http://localhost:3000 (用户: admin, 密码: admin)"
- print_warning "首次登录后，配置数据源: Prometheus URL = http://prometheus:9090"
- print_info "导入仪表盘: Dashboards > Import > ID 1860 (Docker) 或 193 (Node.js)，添加 Aztec metrics。"
- echo "监控指标示例: CPU/内存 (cAdvisor), P2P peers (Aztec /metrics)。"
+  print_success "Grafana 启动成功！访问 http://localhost:3000 (用户: admin, 密码: admin)"
+  print_warning "首次登录后，配置数据源: Prometheus URL = http://prometheus:9090"
+  print_info "导入仪表盘: Dashboards > Import > ID 1860 (Docker) 或 193 (Node.js)，添加 Aztec metrics。"
+  echo "监控指标示例: CPU/内存 (cAdvisor), P2P peers (Aztec /metrics)。"
  else
- print_error "Grafana 启动失败，检查日志: docker logs grafana"
+  print_error "Grafana 启动失败，检查日志: docker logs grafana"
  fi
 
  read -p "按 [Enter] 继续..."
@@ -383,8 +466,8 @@ install_and_start_node() {
  print_info "Aztec 测试网节点安装 (简化版)"
  echo "=========================================="
 
- if ! check_environment; then
- return 1
+ if ! check_environment; then  # 这会自动安装依赖
+  return 1
  fi
 
  echo ""
@@ -395,14 +478,14 @@ install_and_start_node() {
  echo ""
 
  if [[ -n "$OLD_PRIVATE_KEY" && ! "$OLD_PRIVATE_KEY" =~ ^0x[a-fA-F0-9]{64}$ ]]; then
- print_error "私钥格式错误"
- return 1
+  print_error "私钥格式错误"
+  return 1
  fi
 
  local old_address
  if [[ -n "$OLD_PRIVATE_KEY" ]]; then
- old_address=$(generate_address_from_private_key "$OLD_PRIVATE_KEY")
- print_info "旧地址: $old_address"
+  old_address=$(generate_address_from_private_key "$OLD_PRIVATE_KEY")
+  print_info "旧地址: $old_address"
  fi
 
  # 选择模式（简化：无选项2）
@@ -415,59 +498,59 @@ install_and_start_node() {
 
  case $mode_choice in
  1)
- # 选项1: 生成新
- print_info "生成新密钥..."
- rm -rf "$HOME/.aztec/keystore" 2>/dev/null || true
- aztec validator-keys new --fee-recipient 0x0000000000000000000000000000000000000000000000000000000000000000
- new_eth_key=$(jq -r '.validators[0].attester.eth' "$DEFAULT_KEYSTORE")
- new_bls_key=$(jq -r '.validators[0].attester.bls' "$DEFAULT_KEYSTORE")
- new_address=$(generate_address_from_private_key "$new_eth_key")
- is_new=true
- print_success "新地址: $new_address"
- # 密钥打印
- echo ""
- print_warning "=== 保存密钥！ ==="
- echo "ETH 私钥: $new_eth_key"
- echo "BLS 私钥: $new_bls_key"
- echo "地址: $new_address"
- read -p "确认保存后继续..."
+  # 选项1: 生成新
+  print_info "生成新密钥..."
+  rm -rf "$HOME/.aztec/keystore" 2>/dev/null || true
+  aztec validator-keys new --fee-recipient 0x0000000000000000000000000000000000000000000000000000000000000000
+  new_eth_key=$(jq -r '.validators[0].attester.eth' "$DEFAULT_KEYSTORE")
+  new_bls_key=$(jq -r '.validators[0].attester.bls' "$DEFAULT_KEYSTORE")
+  new_address=$(generate_address_from_private_key "$new_eth_key")
+  is_new=true
+  print_success "新地址: $new_address"
+  # 密钥打印
+  echo ""
+  print_warning "=== 保存密钥！ ==="
+  echo "ETH 私钥: $new_eth_key"
+  echo "BLS 私钥: $new_bls_key"
+  echo "地址: $new_address"
+  read -p "确认保存后继续..."
 
- # 授权、转账、注册
- if ! check_and_approve_stake "$ETH_RPC" "$OLD_PRIVATE_KEY" "$old_address"; then return 1; fi
- if ! check_eth_balance "$ETH_RPC" "$new_address"; then
- print_warning "转 ETH 到 $new_address (0.3 ETH)"
- read -p "确认后继续..."
- fi
- print_info "注册新验证者..."
- aztec add-l1-validator --l1-rpc-urls "$ETH_RPC" --network testnet --private-key "$OLD_PRIVATE_KEY" --attester "$new_address" --withdrawer "$new_address" --bls-secret-key "$new_bls_key" --rollup "$ROLLUP_CONTRACT"
- print_success "注册成功"
- ;;
+  # 授权、转账、注册
+  if ! check_and_approve_stake "$ETH_RPC" "$OLD_PRIVATE_KEY" "$old_address"; then return 1; fi
+  if ! check_eth_balance "$ETH_RPC" "$new_address"; then
+   print_warning "转 ETH 到 $new_address (0.3 ETH)"
+   read -p "确认后继续..."
+  fi
+  print_info "注册新验证者..."
+  aztec add-l1-validator --l1-rpc-urls "$ETH_RPC" --network testnet --private-key "$OLD_PRIVATE_KEY" --attester "$new_address" --withdrawer "$new_address" --bls-secret-key "$new_bls_key" --rollup "$ROLLUP_CONTRACT"
+  print_success "注册成功"
+  ;;
  2)
- # 选项2: 加载现有 (原3)
- echo "输入 keystore.json 路径 (默认 $DEFAULT_KEYSTORE): "
- read -p "路径: " keystore_path
- keystore_path=${keystore_path:-$DEFAULT_KEYSTORE}
- if ! load_existing_keystore "$keystore_path"; then return 1; fi
- new_eth_key="$LOADED_ETH_KEY"
- new_bls_key="$LOADED_BLS_KEY"
- new_address="$LOADED_ADDRESS"
- cp "$LOADED_KEYSTORE" "$KEY_DIR/keystore.json"
- # 跳过授权/转账/注册
- if [[ -n "$OLD_PRIVATE_KEY" ]]; then
- check_and_approve_stake "$ETH_RPC" "$OLD_PRIVATE_KEY" "$old_address" || true
- fi
- if ! check_eth_balance "$ETH_RPC" "$new_address"; then
- print_warning "ETH 不足？转到 $new_address"
- read -p "确认后继续..."
- fi
- print_info "检查队列: $DASHTEC_URL/validator/$new_address"
- read -p "确认在队列后继续..."
- print_success "跳过注册 (已完成)"
- ;;
+  # 选项2: 加载现有 (原3)
+  echo "输入 keystore.json 路径 (默认 $DEFAULT_KEYSTORE): "
+  read -p "路径: " keystore_path
+  keystore_path=${keystore_path:-$DEFAULT_KEYSTORE}
+  if ! load_existing_keystore "$keystore_path"; then return 1; fi
+  new_eth_key="$LOADED_ETH_KEY"
+  new_bls_key="$LOADED_BLS_KEY"
+  new_address="$LOADED_ADDRESS"
+  cp "$LOADED_KEYSTORE" "$KEY_DIR/keystore.json"
+  # 跳过授权/转账/注册
+  if [[ -n "$OLD_PRIVATE_KEY" ]]; then
+   check_and_approve_stake "$ETH_RPC" "$OLD_PRIVATE_KEY" "$old_address" || true
+  fi
+  if ! check_eth_balance "$ETH_RPC" "$new_address"; then
+   print_warning "ETH 不足？转到 $new_address"
+   read -p "确认后继续..."
+  fi
+  print_info "检查队列: $DASHTEC_URL/validator/$new_address"
+  read -p "确认在队列后继续..."
+  print_success "跳过注册 (已完成)"
+  ;;
  *)
- print_error "无效选择"
- return 1
- ;;
+  print_error "无效选择"
+  return 1
+  ;;
  esac
 
  # 统一设置环境
@@ -551,26 +634,26 @@ EOF
 # ==================== 菜单 ====================
 main_menu() {
  while true; do
- clear
- echo "========================================"
- echo " Aztec 节点安装 (简化版)"
- echo "========================================"
- echo "1. 安装/启动节点 (带选择)"
- echo "2. 查看日志和状态"
- echo "3. 更新并重启节点"
- echo "4. 性能监控"
- echo "5. 启用/查看监控仪表盘 (Grafana)"
- echo "6. 退出"
- read -p "选择: " choice
- case $choice in
- 1) install_and_start_node ;;
- 2) view_logs_and_status ;;
- 3) update_and_restart_node ;;
- 4) monitor_performance ;;
- 5) enable_monitoring_dashboard ;;
- 6) exit 0 ;;
- *) echo "无效"; read -p "继续...";;
- esac
+  clear
+  echo "========================================"
+  echo " Aztec 节点安装 (简化版)"
+  echo "========================================"
+  echo "1. 安装/启动节点 (带选择)"
+  echo "2. 查看日志和状态"
+  echo "3. 更新并重启节点"
+  echo "4. 性能监控"
+  echo "5. 启用/查看监控仪表盘 (Grafana)"
+  echo "6. 退出"
+  read -p "选择: " choice
+  case $choice in
+  1) install_and_start_node ;;
+  2) view_logs_and_status ;;
+  3) update_and_restart_node ;;
+  4) monitor_performance ;;
+  5) enable_monitoring_dashboard ;;
+  6) exit 0 ;;
+  *) echo "无效"; read -p "继续...";;
+  esac
  done
 }
 
