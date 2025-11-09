@@ -60,14 +60,15 @@ install_dependencies() {
  if ! command -v cast >/dev/null 2>&1; then
   print_info "安装 Foundry (包含 cast)..."
   curl -L https://foundry.paradigm.xyz | bash
+  # 注释掉 source，避免 PS1 unbound 错误
+  # source "$HOME/.bashrc"  # 非交互式 shell 可能出错
   export PATH="$HOME/.foundry/bin:$PATH"
-  source "$HOME/.bashrc"  # 加载环境
   foundryup
   sleep 2
   if command -v cast >/dev/null 2>&1; then
    print_success "Foundry 安装完成 (cast 可用)"
   else
-   print_error "Foundry 安装失败，请手动运行 'foundryup'"
+   print_error "Foundry 安装失败，请手动运行 'export PATH=\"$HOME/.foundry/bin:\$PATH\"; foundryup'"
    read -p "按 Enter 继续 (或 Ctrl+C 退出)..."
   fi
  else
@@ -78,22 +79,33 @@ install_dependencies() {
  if ! command -v aztec >/dev/null 2>&1; then
   print_info "安装 Aztec CLI..."
   bash -i <(curl -s https://install.aztec.network)
+  # 注释掉 source，避免 PS1 unbound 错误
+  # source "$HOME/.bashrc"
   export PATH="$HOME/.aztec/bin:$PATH"
-  source "$HOME/.bashrc"  # 加载环境
   aztec version >/dev/null 2>&1 || aztec-up  # 更新到最新
   if command -v aztec >/dev/null 2>&1; then
    print_success "Aztec CLI 安装完成"
   else
-   print_error "Aztec CLI 安装失败，请手动运行安装命令"
+   print_error "Aztec CLI 安装失败，请手动运行 'export PATH=\"$HOME/.aztec/bin:\$PATH\"; bash -i <(curl -s https://install.aztec.network)'"
    read -p "按 Enter 继续 (或 Ctrl+C 退出)..."
   fi
  else
   print_info "Aztec CLI 已存在，跳过"
  fi
 
- # 永久添加 PATH 到 .bashrc
+ # 永久添加 PATH 到 .bashrc（但不 source，现在）
  echo 'export PATH="$HOME/.foundry/bin:$HOME/.aztec/bin:$PATH"' >> ~/.bashrc
  export PATH="$HOME/.foundry/bin:$HOME/.aztec/bin:$PATH"
+
+ # 验证所有工具
+ print_info "验证安装..."
+ for cmd in docker jq cast aztec; do
+  if command -v "$cmd" >/dev/null 2>&1; then
+   print_success "$cmd: OK ($(command -v $cmd))"
+  else
+   print_warning "$cmd: 仍不可用，手动检查"
+  fi
+ done
 
  print_success "所有依赖安装完成！"
 }
