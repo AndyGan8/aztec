@@ -91,7 +91,7 @@ load_existing_keystore() {
   echo "请立即备份这些密钥！"
   read -p "确认已保存后按 [Enter] 继续..."
 
-  # 验证地址匹配用户预期（可选提示）
+  # 验证地址匹配用户预期
   read -p "输入预期地址确认 (e.g., 0x345...): " expected_address
   if [[ "$new_address" != "$expected_address" ]]; then
     print_warning "地址不匹配！预期: $expected_address, 实际: $new_address"
@@ -99,7 +99,7 @@ load_existing_keystore() {
     [[ "$confirm" != "y" && "$confirm" != "Y" ]] && return 1
   fi
 
-  # 设置全局变量（脚本用）
+  # 设置全局变量
   export LOADED_ETH_KEY="$new_eth_key"
   export LOADED_BLS_KEY="$new_bls_key"
   export LOADED_ADDRESS="$new_address"
@@ -153,7 +153,7 @@ check_eth_balance() {
 # ==================== 主安装流程 ====================
 install_and_start_node() {
   clear
-  print_info "Aztec 测试网节点安装 (加载现有密钥版)"
+  print_info "Aztec 测试网节点安装 (简化版)"
   echo "=========================================="
 
   if ! check_environment; then
@@ -178,18 +178,17 @@ install_and_start_node() {
     print_info "旧地址: $old_address"
   fi
 
-  # 选择模式
+  # 选择模式（简化：无选项2）
   echo ""
   print_info "选择模式："
   echo "1. 生成新地址 (自动注册)"
-  echo "2. 复用旧地址 (手动输入 BLS)"
-  echo "3. 加载现有 keystore.json (推荐，用于已注册地址)"
-  read -p "请选择 (1-3): " mode_choice
+  echo "2. 加载现有 keystore.json (推荐，用于已注册地址)"
+  read -p "请选择 (1-2): " mode_choice
   local new_eth_key new_bls_key new_address is_new=false
 
   case $mode_choice in
     1)
-      # 选项1: 生成新 (原逻辑，略)
+      # 选项1: 生成新
       print_info "生成新密钥..."
       rm -rf "$HOME/.aztec/keystore" 2>/dev/null || true
       aztec validator-keys new --fee-recipient 0x0000000000000000000000000000000000000000000000000000000000000000
@@ -198,27 +197,26 @@ install_and_start_node() {
       new_address=$(generate_address_from_private_key "$new_eth_key")
       is_new=true
       print_success "新地址: $new_address"
-      # ... (密钥打印、授权、转账、注册，如之前)
+      # 密钥打印
+      echo ""
+      print_warning "=== 保存密钥！ ==="
+      echo "ETH 私钥: $new_eth_key"
+      echo "BLS 私钥: $new_bls_key"
+      echo "地址: $new_address"
+      read -p "确认保存后继续..."
+
+      # 授权、转账、注册
       if ! check_and_approve_stake "$ETH_RPC" "$OLD_PRIVATE_KEY" "$old_address"; then return 1; fi
       if ! check_eth_balance "$ETH_RPC" "$new_address"; then
         print_warning "转 ETH 到 $new_address (0.3 ETH)"
         read -p "确认后继续..."
       fi
+      print_info "注册新验证者..."
       aztec add-l1-validator --l1-rpc-urls "$ETH_RPC" --network testnet --private-key "$OLD_PRIVATE_KEY" --attester "$new_address" --withdrawer "$new_address" --bls-secret-key "$new_bls_key" --rollup "$ROLLUP_CONTRACT"
+      print_success "注册成功"
       ;;
     2)
-      # 选项2: 手动输入 (原逻辑)
-      read -p "旧 BLS 私钥: " input_bls
-      new_eth_key="$OLD_PRIVATE_KEY"
-      new_bls_key="$input_bls"
-      new_address="$old_address"
-      print_success "复用地址: $new_address"
-      if ! check_and_approve_stake "$ETH_RPC" "$OLD_PRIVATE_KEY" "$old_address"; then return 1; fi
-      if ! check_eth_balance "$ETH_RPC" "$new_address"; then read -p "转 ETH 后继续..."; fi
-      print_success "跳过注册 (假设已完成)"
-      ;;
-    3)
-      # 新选项3: 加载现有 keystore
+      # 选项2: 加载现有 (原3)
       echo "输入 keystore.json 路径 (默认 $DEFAULT_KEYSTORE): "
       read -p "路径: " keystore_path
       keystore_path=${keystore_path:-$DEFAULT_KEYSTORE}
@@ -226,10 +224,10 @@ install_and_start_node() {
       new_eth_key="$LOADED_ETH_KEY"
       new_bls_key="$LOADED_BLS_KEY"
       new_address="$LOADED_ADDRESS"
-      cp "$LOADED_KEYSTORE" "$KEY_DIR/keystore.json"  # 复制到节点目录
+      cp "$LOADED_KEYSTORE" "$KEY_DIR/keystore.json"
       # 跳过授权/转账/注册
       if [[ -n "$OLD_PRIVATE_KEY" ]]; then
-        check_and_approve_stake "$ETH_RPC" "$OLD_PRIVATE_KEY" "$old_address" || true  # 可选检查
+        check_and_approve_stake "$ETH_RPC" "$OLD_PRIVATE_KEY" "$old_address" || true
       fi
       if ! check_eth_balance "$ETH_RPC" "$new_address"; then
         print_warning "ETH 不足？转到 $new_address"
@@ -264,7 +262,6 @@ VALIDATOR_PRIVATE_KEY=${new_eth_key}
 COINBASE=${new_address}
 EOF
 
-  # docker-compose.yml (同之前，省略以节省空间；复制原脚本的)
   cat > "$AZTEC_DIR/docker-compose.yml" <<'EOF'
 services:
   aztec-sequencer:
@@ -328,9 +325,9 @@ main_menu() {
   while true; do
     clear
     echo "========================================"
-    echo "     Aztec 节点安装 (加载现有密钥版)"
+    echo "     Aztec 节点安装 (简化版)"
     echo "========================================"
-    echo "1. 安装/启动节点"
+    echo "1. 安装/启动节点 (带选择)"
     echo "2. 查看日志"
     echo "3. 检查状态"
     echo "4. 退出"
@@ -342,6 +339,8 @@ main_menu() {
         if docker ps | grep -q aztec-sequencer; then
           echo "运行中"
           docker logs --tail 10 aztec-sequencer
+          echo ""
+          curl -s http://localhost:8080/status || echo "API 未响应"
         else
           echo "未运行"
         fi
