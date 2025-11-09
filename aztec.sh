@@ -150,6 +150,69 @@ check_eth_balance() {
   fi
 }
 
+# ==================== 检查 RPC 连通性 ====================
+check_rpc_connectivity() {
+  local eth_rpc=$1
+  local cons_rpc=$2
+
+  print_info "检查执行层 RPC ($eth_rpc)..."
+  if cast block-number --rpc-url "$eth_rpc" >/dev/null 2>&1; then
+    local eth_block=$(cast block-number --rpc-url "$eth_rpc")
+    print_success "执行层 RPC 正常 (最新块: $eth_block)"
+  else
+    print_error "执行层 RPC 不可达"
+    return 1
+  fi
+
+  print_info "检查 Beacon Chain RPC ($cons_rpc)..."
+  if cast block-number --rpc-url "$cons_rpc" >/dev/null 2>&1; then
+    local cons_block=$(cast block-number --rpc-url "$cons_rpc")
+    print_success "Beacon Chain RPC 正常 (最新块: $cons_block)"
+  else
+    print_error "Beacon Chain RPC 不可达"
+    return 1
+  fi
+  return 0
+}
+
+# ==================== 检查系统资源 ====================
+check_system_resources() {
+  print_info "检查 VPS 内存使用..."
+  free -h | grep -E "^Mem:" | awk '{printf "总内存: %s 已用: %s (%.1f%%)\n", $2, $3, ($3/$2)*100}'
+
+  print_info "检查 VPS CPU 使用..."
+  local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 | awk '{printf "%.1f%%\n", $1}')
+  print_success "CPU 使用率: $cpu_usage"
+
+  local cpu_cores=$(nproc)
+  print_info "CPU 核心数: $cpu_cores"
+
+  if [[ $(echo "$cpu_usage > 80" | bc -l 2>/dev/null || echo "0") -eq 1 ]]; then
+    print_warning "CPU 使用率较高 (>80%)，建议监控"
+  fi
+
+  if ! command -v bc >/dev/null 2>&1; then
+    print_warning "未安装 bc 工具，无法精确计算百分比"
+  fi
+}
+
+# ==================== 检查 RPC 和系统资源 ====================
+check_rpc_and_resources() {
+  echo "请输入 RPC 信息（如果已安装节点，可使用相同值）："
+  read -p "L1 执行 RPC URL: " ETH_RPC_CHECK
+  read -p "L1 共识 Beacon RPC URL: " CONS_RPC_CHECK
+
+  if ! check_rpc_connectivity "$ETH_RPC_CHECK" "$CONS_RPC_CHECK"; then
+    print_error "RPC 检查失败"
+    return 1
+  fi
+
+  echo ""
+  check_system_resources
+
+  read -p "按 [Enter] 继续..."
+}
+
 # ==================== 主安装流程 ====================
 install_and_start_node() {
   clear
@@ -330,7 +393,8 @@ main_menu() {
     echo "1. 安装/启动节点 (带选择)"
     echo "2. 查看日志"
     echo "3. 检查状态"
-    echo "4. 退出"
+    echo "4. 检查 RPC 和系统资源"
+    echo "5. 退出"
     read -p "选择: " choice
     case $choice in
       1) install_and_start_node ;;
@@ -345,7 +409,8 @@ main_menu() {
           echo "未运行"
         fi
         read -p "继续...";;
-      4) exit 0 ;;
+      4) check_rpc_and_resources ;;
+      5) exit 0 ;;
       *) echo "无效"; read -p "继续...";;
     esac
   done
