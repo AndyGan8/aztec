@@ -231,30 +231,51 @@ load_existing_keystore() {
  return 0
 }
 
-# ==================== 检查 STAKE 授权 ====================
-check_and_approve_stake() {
+# ==================== 检查 STAKE 授权和余额 ====================
+check_stake_balance_and_approve() {
  local eth_rpc=$1
- local old_private_key=$2
- local old_address=$3
- local stake_amount=200000000000000000000000000
+ local funding_private_key=$2
+ local funding_address=$3
+ local stake_amount=200000000000000000000000000  # 200M STAKE wei
 
+ # 检查 STAKE 余额
+ print_info "检查 STAKE 余额..."
+ local stake_balance
+ stake_balance=$(cast call "$STAKE_TOKEN" "balanceOf(address)(uint256)" "$funding_address" --rpc-url "$eth_rpc" 2>/dev/null || echo "0")
+ print_info "当前 STAKE 余额: $(echo "scale=0; $stake_balance / 1e18" | bc) STAKE"
+ if [[ "$stake_balance" -lt "$stake_amount" ]]; then
+  print_error "STAKE 余额不足！需要 200M STAKE，当前 $(echo "scale=0; $stake_balance / 1e18" | bc) STAKE"
+  print_warning "请从 Faucet 获取: https://testnet.aztec.network/faucet"
+  read -p "确认补充后按 [Enter] 继续..."
+ fi
+
+ # 检查授权
  print_info "检查 STAKE 授权..."
  local allowance
- allowance=$(cast call "$STAKE_TOKEN" "allowance(address,address)(uint256)" "$old_address" "$ROLLUP_CONTRACT" --rpc-url "$eth_rpc" 2>/dev/null || echo "0")
+ allowance=$(cast call "$STAKE_TOKEN" "allowance(address,address)(uint256)" "$funding_address" "$ROLLUP_CONTRACT" --rpc-url "$eth_rpc" 2>/dev/null || echo "0")
  if [[ "$allowance" -ge "$stake_amount" ]]; then
-  print_success "STAKE 已授权"
+  print_success "STAKE 已授权 (额度: $(echo "scale=0; $allowance / 1e18" | bc) STAKE)"
   return 0
  fi
 
- print_warning "执行授权..."
- if ! cast send "$STAKE_TOKEN" "approve(address,uint256)" \
-  "$ROLLUP_CONTRACT" "$stake_amount" \
-  --private-key "$old_private_key" --rpc-url "$eth_rpc"; then
-  print_error "授权失败"
-  return 1
- fi
- print_success "授权成功"
- return 0
+ # 执行授权 (重试 3 次)
+ print_warning "执行 STAKE 授权 (额度: 200M STAKE)..."
+ for attempt in 1 2 3; do
+  if cast send "$STAKE_TOKEN" "approve(address,uint256)" \
+   "$ROLLUP_CONTRACT" "$stake_amount" \
+   --private-key "$funding_private_key" --rpc-url "$eth_rpc" --gas-price 2gwei; then
+   sleep 10  # 等待确认
+   allowance=$(cast call "$STAKE_TOKEN" "allowance(address,address)(uint256)" "$funding_address" "$ROLLUP_CONTRACT" --rpc-url "$eth_rpc" 2>/dev/null || echo "0")
+   if [[ "$allowance" -ge "$stake_amount" ]]; then
+    print_success "授权成功 (尝试 $attempt)！额度: $(echo "scale=0; $allowance / 1e18" | bc) STAKE"
+    return 0
+   fi
+  fi
+  print_warning "授权失败 (尝试 $attempt)，重试中..."
+  sleep 5
+ done
+ print_error "授权失败 3 次，请手动检查 gas/STAKE 余额或 RPC"
+ return 1
 }
 
 # ==================== 检查 ETH 余额 ====================
@@ -269,7 +290,7 @@ check_eth_balance() {
   print_success "ETH 充足 ($balance_eth ETH)"
   return 0
  else
-  print_warning "ETH 不足 ($balance_eth ETH)"
+  print_warning "ETH 不足 ($balance_eth ETH)，需至少 0.2 ETH 用于 gas"
   return 1
  fi
 }
@@ -509,22 +530,27 @@ install_and_start_node() {
 
  echo ""
  echo "请输入基础信息："
- read -p "L1 执行 RPC URL: " ETH_RPC
- read -p "L1 共识 Beacon RPC URL: " CONS_RPC
- read -p "旧验证者私钥 (用于授权，如果需要): " OLD_PRIVATE_KEY
+ read -p "L1 执行 RPC URL (e.g., https://ethereum-sepolia-rpc.publicnode.com): " ETH_RPC
+ read -p "L1 共识 Beacon RPC URL (e.g., https://ethereum-sepolia-beacon-api.publicnode.com): " CONS_RPC
+ read -p "Funding 私钥 (用于授权和质押 STAKE，必须有 200M STAKE 和 0.2 ETH): " FUNDING_PRIVATE_KEY
  echo ""
 
- if [[ -n "$OLD_PRIVATE_KEY" && ! "$OLD_PRIVATE_KEY" =~ ^0x[a-fA-F0-9]{64}$ ]]; then
+ if [[ -n "$FUNDING_PRIVATE_KEY" && ! "$FUNDING_PRIVATE_KEY" =~ ^0x[a-fA-F0-9]{64}$ ]]; then
   print_error "私钥格式错误"
   return 1
  fi
 
- local old_address
- if [[ -n "$OLD_PRIVATE_KEY" ]]; then
-  old_address=$(generate_address_from_private_key "$OLD_PRIVATE_KEY")
-  print_info "旧地址: $old_address"
+ local funding_address
+ if [[ -n "$FUNDING_PRIVATE_KEY" ]]; then
+  funding_address=$(generate_address_from_private_key "$FUNDING_PRIVATE_KEY")
+  print_info "Funding 地址: $funding_address"
+  if ! check_eth_balance "$ETH_RPC" "$funding_address"; then
+   print_warning "Funding 地址 ETH 不足，请补充 0.2 ETH"
+   read -p "确认后继续..."
+  fi
  fi
 
+ # 选择模式
  echo ""
  print_info "选择模式："
  echo "1. 生成新地址 (自动注册)"
@@ -548,13 +574,18 @@ install_and_start_node() {
   echo "地址: $new_address"
   read -p "确认保存后继续..."
 
-  if ! check_and_approve_stake "$ETH_RPC" "$OLD_PRIVATE_KEY" "$old_address"; then return 1; fi
+  # 授权 STAKE 和检查余额
+  if [[ -z "$FUNDING_PRIVATE_KEY" ]]; then
+   print_error "Funding 私钥不能为空！用于 STAKE 授权和注册"
+   return 1
+  fi
+  if ! check_stake_balance_and_approve "$ETH_RPC" "$FUNDING_PRIVATE_KEY" "$funding_address"; then return 1; fi
   if ! check_eth_balance "$ETH_RPC" "$new_address"; then
-   print_warning "转 ETH 到 $new_address (0.3 ETH)"
+   print_warning "新地址 ETH 不足，请转 0.3 ETH 到 $new_address"
    read -p "确认后继续..."
   fi
   print_info "注册新验证者..."
-  aztec add-l1-validator --l1-rpc-urls "$ETH_RPC" --network testnet --private-key "$OLD_PRIVATE_KEY" --attester "$new_address" --withdrawer "$new_address" --bls-secret-key "$new_bls_key" --rollup "$ROLLUP_CONTRACT"
+  aztec add-l1-validator --l1-rpc-urls "$ETH_RPC" --network testnet --private-key "$FUNDING_PRIVATE_KEY" --attester "$new_address" --withdrawer "$new_address" --bls-secret-key "$new_bls_key" --rollup "$ROLLUP_CONTRACT"
   print_success "注册成功"
   ;;
  2)
@@ -566,8 +597,8 @@ install_and_start_node() {
   new_bls_key="$LOADED_BLS_KEY"
   new_address="$LOADED_ADDRESS"
   cp "$LOADED_KEYSTORE" "$KEY_DIR/keystore.json"
-  if [[ -n "$OLD_PRIVATE_KEY" ]]; then
-   check_and_approve_stake "$ETH_RPC" "$OLD_PRIVATE_KEY" "$old_address" || true
+  if [[ -n "$FUNDING_PRIVATE_KEY" ]]; then
+   if ! check_stake_balance_and_approve "$ETH_RPC" "$FUNDING_PRIVATE_KEY" "$funding_address"; then return 1; fi
   fi
   if ! check_eth_balance "$ETH_RPC" "$new_address"; then
    print_warning "ETH 不足？转到 $new_address"
@@ -583,6 +614,7 @@ install_and_start_node() {
   ;;
  esac
 
+ # 统一设置环境
  print_info "设置节点环境..."
  mkdir -p "$AZTEC_DIR" "$DATA_DIR" "$KEY_DIR"
  local public_ip=$(curl -s ipv4.icanhazip.com || echo "127.0.0.1")
@@ -643,6 +675,7 @@ networks:
   name: aztec
 EOF
 
+ # 启动
  print_info "启动节点..."
  cd "$AZTEC_DIR"
  docker compose up -d
