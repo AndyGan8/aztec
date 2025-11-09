@@ -82,15 +82,25 @@ install_dependencies() {
   # 注释掉 source，避免 PS1 unbound 错误
   # source "$HOME/.bashrc"
   export PATH="$HOME/.aztec/bin:$PATH"
-  aztec version >/dev/null 2>&1 || aztec-up  # 更新到最新
-  if command -v aztec >/dev/null 2>&1; then
-   print_success "Aztec CLI 安装完成"
-  else
-   print_error "Aztec CLI 安装失败，请手动运行 'export PATH=\"$HOME/.aztec/bin:\$PATH\"; bash -i <(curl -s https://install.aztec.network)'"
+ else
+  print_info "Aztec CLI 已存在，检查更新..."
+  export PATH="$HOME/.aztec/bin:$PATH"
+ fi
+
+ # 更新 Aztec CLI 到最新版本（修复未知命令问题）
+ if command -v aztec >/dev/null 2>&1; then
+  print_info "更新 Aztec CLI 到最新版本..."
+  aztec-up || aztec-up latest  # 尝试 latest 或默认
+  sleep 5  # 等待更新完成
+  aztec version  # 测试版本命令
+  if ! aztec validator-keys --help >/dev/null 2>&1; then
+   print_warning "validator-keys 子命令仍不可用，可能需手动 aztec-up 2.0.2"
    read -p "按 Enter 继续 (或 Ctrl+C 退出)..."
   fi
+  print_success "Aztec CLI 更新完成"
  else
-  print_info "Aztec CLI 已存在，跳过"
+  print_error "Aztec CLI 安装失败，请手动运行安装命令"
+  read -p "按 Enter 继续 (或 Ctrl+C 退出)..."
  fi
 
  # 永久添加 PATH 到 .bashrc（但不 source，现在）
