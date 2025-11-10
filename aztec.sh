@@ -170,8 +170,8 @@ install_and_start_node() {
                 return 1
             fi
             
-            new_eth_key=$(jq -r '.validators[0].attester.eth.privateKey' "$DEFAULT_KEYSTORE")
-            new_bls_key=$(jq -r '.validators[0].attester.bls.privateKey' "$DEFAULT_KEYSTORE")
+            new_eth_key=$(jq -r '.validators[0].attester.eth' "$DEFAULT_KEYSTORE")
+            new_bls_key=$(jq -r '.validators[0].attester.bls' "$DEFAULT_KEYSTORE")
             new_address=$(generate_address_from_private_key "$new_eth_key")
             
             if [[ -z "$new_address" ]]; then
@@ -208,8 +208,8 @@ install_and_start_node() {
                 return 1
             fi
             
-            new_eth_key=$(jq -r '.validators[0].attester.eth.privateKey' "$keystore_path")
-            new_bls_key=$(jq -r '.validators[0].attester.bls.privateKey' "$keystore_path")
+            new_eth_key=$(jq -r '.validators[0].attester.eth' "$keystore_path")
+            new_bls_key=$(jq -r '.validators[0].attester.bls' "$keystore_path")
             
             if [[ -z "$new_eth_key" || "$new_eth_key" == "null" ]]; then
                 print_error "ETH 私钥读取失败"
@@ -482,8 +482,8 @@ register_validator_direct() {
             
             if aztec validator-keys new --fee-recipient 0x0000000000000000000000000000000000000000000000000000000000000000 --directory "/tmp/aztec_register_keystore"; then
                 local temp_keystore="/tmp/aztec_register_keystore/key1.json"
-                validator_eth_key=$(jq -r '.validators[0].attester.eth.privateKey' "$temp_keystore")
-                validator_bls_key=$(jq -r '.validators[0].attester.bls.privateKey' "$temp_keystore")
+                validator_eth_key=$(jq -r '.validators[0].attester.eth' "$temp_keystore")
+                validator_bls_key=$(jq -r '.validators[0].attester.bls' "$temp_keystore")
                 validator_address=$(generate_address_from_private_key "$validator_eth_key")
                 
                 print_success "新验证者地址: $validator_address"
@@ -505,8 +505,8 @@ register_validator_direct() {
             read -p "请输入 keystore.json 路径: " keystore_path
             keystore_path=${keystore_path:-$DEFAULT_KEYSTORE}
             if [[ -f "$keystore_path" ]]; then
-                validator_eth_key=$(jq -r '.validators[0].attester.eth.privateKey' "$keystore_path")
-                validator_bls_key=$(jq -r '.validators[0].attester.bls.privateKey' "$keystore_path")
+                validator_eth_key=$(jq -r '.validators[0].attester.eth' "$keystore_path")
+                validator_bls_key=$(jq -r '.validators[0].attester.bls' "$keystore_path")
                 validator_address=$(generate_address_from_private_key "$validator_eth_key")
                 print_success "加载成功！地址: $validator_address"
             else
