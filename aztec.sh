@@ -51,6 +51,34 @@ retry_cmd() {
   return 1
 }
 
+# ==================== 清理现有容器 ====================
+cleanup_existing_containers() {
+    print_info "检查并清理现有容器..."
+    
+    # 检查是否有正在运行的 aztec-sequencer 容器
+    if docker ps -a | grep -q aztec-sequencer; then
+        print_warning "发现现有的 aztec-sequencer 容器，正在清理..."
+        
+        # 停止容器
+        if docker ps | grep -q aztec-sequencer; then
+            docker stop aztec-sequencer
+            sleep 3
+        fi
+        
+        # 删除容器
+        docker rm aztec-sequencer 2>/dev/null || true
+        print_success "现有容器已清理"
+    else
+        print_info "没有找到现有的 aztec-sequencer 容器"
+    fi
+    
+    # 清理网络（如果存在）
+    if docker network ls | grep -q aztec; then
+        print_info "清理现有网络..."
+        docker network rm aztec 2>/dev/null || true
+    fi
+}
+
 # ==================== 初始化命令路径 ====================
 initialize_commands() {
     print_info "初始化命令路径..."
@@ -589,6 +617,9 @@ install_and_start_node() {
             ;;
     esac
 
+    # ==================== 清理现有容器 ====================
+    cleanup_existing_containers
+
     # ==================== 安装和启动节点 ====================
     print_info "设置节点环境（使用密钥: $new_address）..."
     mkdir -p "$AZTEC_DIR" "$DATA_DIR" "$KEY_DIR"
@@ -807,6 +838,10 @@ update_and_restart_node() {
         read -p "按 [Enter] 继续..."
         return 1
     fi
+    
+    # 清理现有容器
+    cleanup_existing_containers
+    
     print_info "检查并拉取最新 Aztec 镜像..."
     cd "$AZTEC_DIR"
     local old_image=$($DOCKER_CMD inspect aztec-sequencer --format '{{.Config.Image}}' 2>/dev/null || echo "未知")
