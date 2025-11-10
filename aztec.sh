@@ -170,8 +170,8 @@ install_and_start_node() {
                 return 1
             fi
             
-            new_eth_key=$(jq -r '.validators[0].attester.eth' "$DEFAULT_KEYSTORE")
-            new_bls_key=$(jq -r '.validators[0].attester.bls' "$DEFAULT_KEYSTORE")
+            new_eth_key=$(jq -r '.validators[0].attester.eth.privateKey' "$DEFAULT_KEYSTORE")
+            new_bls_key=$(jq -r '.validators[0].attester.bls.privateKey' "$DEFAULT_KEYSTORE")
             new_address=$(generate_address_from_private_key "$new_eth_key")
             
             if [[ -z "$new_address" ]]; then
@@ -179,6 +179,14 @@ install_and_start_node() {
                 read -p "按任意键返回菜单..."
                 return 1
             fi
+            
+            # 复制 keystore 到 Docker 挂载目录
+            print_info "复制 keystore 到节点目录..."
+            mkdir -p "$KEY_DIR"
+            cp "$DEFAULT_KEYSTORE" "$KEY_DIR/key1.json"
+            chown -R root:root "$KEY_DIR"
+            chmod 600 "$KEY_DIR/key1.json"
+            print_success "Keystore 已复制到 $KEY_DIR/key1.json"
             
             print_success "新地址: $new_address"
             echo ""
@@ -200,8 +208,8 @@ install_and_start_node() {
                 return 1
             fi
             
-            new_eth_key=$(jq -r '.validators[0].attester.eth' "$keystore_path")
-            new_bls_key=$(jq -r '.validators[0].attester.bls' "$keystore_path")
+            new_eth_key=$(jq -r '.validators[0].attester.eth.privateKey' "$keystore_path")
+            new_bls_key=$(jq -r '.validators[0].attester.bls.privateKey' "$keystore_path")
             
             if [[ -z "$new_eth_key" || "$new_eth_key" == "null" ]]; then
                 print_error "ETH 私钥读取失败"
@@ -211,6 +219,14 @@ install_and_start_node() {
             
             new_address=$(generate_address_from_private_key "$new_eth_key")
             print_success "加载成功！地址: $new_address"
+            
+            # 复制 keystore 到 Docker 挂载目录
+            print_info "复制 keystore 到节点目录..."
+            mkdir -p "$KEY_DIR"
+            cp "$keystore_path" "$KEY_DIR/key1.json"
+            chown -R root:root "$KEY_DIR"
+            chmod 600 "$KEY_DIR/key1.json"
+            print_success "Keystore 已复制到 $KEY_DIR/key1.json"
             ;;
         *)
             print_error "无效选择"
@@ -228,8 +244,8 @@ install_and_start_node() {
     local public_ip=$(curl -s --connect-timeout 5 ipv4.icanhazip.com || echo "127.0.0.1")
     
     cat > "$AZTEC_DIR/.env" <<EOF
-DATA_DIRECTORY=./data
-KEY_STORE_DIRECTORY=./keys
+# DATA_DIRECTORY=./data  # 注释掉，使用 Docker 卷
+# KEY_STORE_DIRECTORY=./keys  # 注释掉，使用 Docker 环境变量
 LOG_LEVEL=debug
 ETHEREUM_HOSTS=${ETH_RPC}
 L1_CONSENSUS_HOST_URLS=${CONS_RPC}
@@ -466,8 +482,8 @@ register_validator_direct() {
             
             if aztec validator-keys new --fee-recipient 0x0000000000000000000000000000000000000000000000000000000000000000 --directory "/tmp/aztec_register_keystore"; then
                 local temp_keystore="/tmp/aztec_register_keystore/key1.json"
-                validator_eth_key=$(jq -r '.validators[0].attester.eth' "$temp_keystore")
-                validator_bls_key=$(jq -r '.validators[0].attester.bls' "$temp_keystore")
+                validator_eth_key=$(jq -r '.validators[0].attester.eth.privateKey' "$temp_keystore")
+                validator_bls_key=$(jq -r '.validators[0].attester.bls.privateKey' "$temp_keystore")
                 validator_address=$(generate_address_from_private_key "$validator_eth_key")
                 
                 print_success "新验证者地址: $validator_address"
@@ -489,8 +505,8 @@ register_validator_direct() {
             read -p "请输入 keystore.json 路径: " keystore_path
             keystore_path=${keystore_path:-$DEFAULT_KEYSTORE}
             if [[ -f "$keystore_path" ]]; then
-                validator_eth_key=$(jq -r '.validators[0].attester.eth' "$keystore_path")
-                validator_bls_key=$(jq -r '.validators[0].attester.bls' "$keystore_path")
+                validator_eth_key=$(jq -r '.validators[0].attester.eth.privateKey' "$keystore_path")
+                validator_bls_key=$(jq -r '.validators[0].attester.bls.privateKey' "$keystore_path")
                 validator_address=$(generate_address_from_private_key "$validator_eth_key")
                 print_success "加载成功！地址: $validator_address"
             else
