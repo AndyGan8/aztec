@@ -9,17 +9,6 @@ fi
 # 确保 PATH 包含必要的目录
 export PATH="$HOME/.foundry/bin:$HOME/.aztec/bin:$PATH"
 
-# 尝试从环境变量获取命令路径，若找不到则使用默认路径
-FOUNDRY_BIN_DIR="$HOME/.foundry/bin"
-AZTEC_BIN_DIR="$HOME/.aztec/bin"
-
-# 定义关键命令的完整路径，避免依赖 PATH
-CAST_CMD=""
-FORGE_CMD=""
-AZTEC_CMD=""
-DOCKER_CMD=""
-JQ_CMD=""
-
 # ==================== 常量 ====================
 AZTEC_DIR="/root/aztec-sequencer"
 DATA_DIR="/root/aztec-sequencer/data"
@@ -79,50 +68,113 @@ cleanup_existing_containers() {
     fi
 }
 
-# ==================== 初始化命令路径 ====================
-initialize_commands() {
-    print_info "初始化命令路径..."
+# ==================== 修复的 Aztec CLI 安装 ====================
+install_aztec_cli() {
+    print_info "安装 Aztec CLI..."
     
-    # 查找 Docker
-    if command -v docker >/dev/null 2>&1; then
-        DOCKER_CMD=$(command -v docker)
-    elif [ -f "/usr/bin/docker" ]; then
-        DOCKER_CMD="/usr/bin/docker"
+    # 清理可能存在的旧安装
+    rm -rf "$HOME/.aztec" 2>/dev/null || true
+    rm -rf /tmp/aztec_install 2>/dev/null || true
+    mkdir -p /tmp/aztec_install
+    
+    # 方法1: 使用官方安装脚本（修复版）
+    print_info "方法1: 使用官方安装脚本..."
+    if ! curl -fsSL https://install.aztec.network | bash -s -- -y; then
+        print_warning "官方安装脚本失败，尝试方法2..."
+        
+        # 方法2: 手动安装
+        print_info "方法2: 手动安装..."
+        local aztec_version="2.1.2"
+        
+        # 检测系统架构
+        local arch
+        case $(uname -m) in
+            x86_64) arch="x64" ;;
+            aarch64) arch="arm64" ;;
+            *) arch="x64" ;;
+        esac
+        
+        local os
+        case $(uname -s) in
+            Linux) os="linux" ;;
+            Darwin) os="darwin" ;;
+            *) os="linux" ;;
+        esac
+        
+        # 下载特定版本的 Aztec
+        local download_url="https://aztec-sequencer-releases.s3.amazonaws.com/aztec-${aztec_version}-${os}-${arch}.tar.gz"
+        print_info "下载 Aztec CLI: $download_url"
+        
+        if curl -fsSL -o /tmp/aztec_install/aztec.tar.gz "$download_url"; then
+            # 解压并安装
+            tar -xzf /tmp/aztec_install/aztec.tar.gz -C /tmp/aztec_install/
+            
+            # 创建目录并移动文件
+            mkdir -p "$HOME/.aztec/bin"
+            mv /tmp/aztec_install/aztec "$HOME/.aztec/bin/"
+            chmod +x "$HOME/.aztec/bin/aztec"
+            
+            # 设置环境变量
+            export PATH="$HOME/.aztec/bin:$PATH"
+            echo 'export PATH="$HOME/.aztec/bin:$PATH"' >> ~/.bashrc
+            echo 'export PATH="$HOME/.aztec/bin:$PATH"' >> ~/.profile
+            
+            # 验证安装
+            if "$HOME/.aztec/bin/aztec" --version >/dev/null 2>&1; then
+                print_success "Aztec CLI 手动安装成功"
+                return 0
+            fi
+        else
+            print_warning "方法2失败，尝试方法3..."
+        fi
     else
-        print_error "Docker 未找到"
-        return 1
+        # 官方安装脚本成功，设置环境变量
+        export PATH="$HOME/.aztec/bin:$PATH"
+        echo 'export PATH="$HOME/.aztec/bin:$PATH"' >> ~/.bashrc
+        echo 'export PATH="$HOME/.aztec/bin:$PATH"' >> ~/.profile
+        
+        # 验证安装
+        if command -v aztec >/dev/null 2>&1; then
+            print_success "Aztec CLI 官方安装成功"
+            return 0
+        fi
     fi
     
-    # 查找 jq
-    if command -v jq >/dev/null 2>&1; then
-        JQ_CMD=$(command -v jq)
-    elif [ -f "/usr/bin/jq" ]; then
-        JQ_CMD="/usr/bin/jq"
-    else
-        print_error "jq 未找到"
-        return 1
+    # 方法3: 使用 npm 安装（如果可用）
+    print_info "方法3: 尝试使用 npm 安装..."
+    if command -v npm >/dev/null 2>&1; then
+        npm install -g @aztec/cli@2.1.2
+        if command -v aztec >/dev/null 2>&1; then
+            print_success "Aztec CLI npm 安装成功"
+            return 0
+        fi
     fi
     
-    # 查找 cast
-    if command -v cast >/dev/null 2>&1; then
-        CAST_CMD=$(command -v cast)
-    elif [ -f "$FOUNDRY_BIN_DIR/cast" ]; then
-        CAST_CMD="$FOUNDRY_BIN_DIR/cast"
-    else
-        print_warning "cast 未找到，将尝试安装"
+    # 方法4: 从 GitHub 发布页面下载
+    print_info "方法4: 从 GitHub 下载..."
+    local github_url="https://github.com/AztecProtocol/aztec-packages/releases/download/aztec-cli-v2.1.2/aztec-2.1.2-linux-x64.tar.gz"
+    if curl -fsSL -L -o /tmp/aztec_install/aztec_github.tar.gz "$github_url"; then
+        tar -xzf /tmp/aztec_install/aztec_github.tar.gz -C /tmp/aztec_install/
+        mkdir -p "$HOME/.aztec/bin"
+        find /tmp/aztec_install -name "aztec" -type f -exec mv {} "$HOME/.aztec/bin/" \;
+        chmod +x "$HOME/.aztec/bin/aztec"
+        
+        export PATH="$HOME/.aztec/bin:$PATH"
+        echo 'export PATH="$HOME/.aztec/bin:$PATH"' >> ~/.bashrc
+        echo 'export PATH="$HOME/.aztec/bin:$PATH"' >> ~/.profile
+        
+        if "$HOME/.aztec/bin/aztec" --version >/dev/null 2>&1; then
+            print_success "Aztec CLI GitHub 安装成功"
+            return 0
+        fi
     fi
     
-    # 查找 aztec
-    if command -v aztec >/dev/null 2>&1; then
-        AZTEC_CMD=$(command -v aztec)
-    elif [ -f "$AZTEC_BIN_DIR/aztec" ]; then
-        AZTEC_CMD="$AZTEC_BIN_DIR/aztec"
-    else
-        print_warning "aztec 未找到，将尝试安装"
-    fi
-    
-    print_success "命令路径初始化完成"
-    return 0
+    print_error "所有 Aztec CLI 安装方法都失败了"
+    echo "请手动安装:"
+    echo "1. 访问: https://docs.aztec.network/dev_docs/cli/install"
+    echo "2. 运行: curl -fsSL https://install.aztec.network | bash"
+    echo "3. 或者: npm install -g @aztec/cli@2.1.2"
+    return 1
 }
 
 # ==================== 安装 Foundry ====================
@@ -130,21 +182,22 @@ install_foundry() {
     print_info "安装 Foundry..."
     
     # 清理可能存在的旧安装
-    rm -rf "$FOUNDRY_BIN_DIR" 2>/dev/null || true
+    rm -rf "$HOME/.foundry" 2>/dev/null || true
     
     # 安装 Foundry
     curl -L --retry 3 --connect-timeout 30 https://foundry.paradigm.xyz | bash
     
     # 确保路径存在
-    export PATH="$FOUNDRY_BIN_DIR:$PATH"
+    export PATH="$HOME/.foundry/bin:$PATH"
     echo 'export PATH="$HOME/.foundry/bin:$PATH"' >> ~/.bashrc
+    echo 'export PATH="$HOME/.foundry/bin:$PATH"' >> ~/.profile
     
     # 等待一下确保安装完成
     sleep 3
     
     # 运行 foundryup
-    if [[ -f "$FOUNDRY_BIN_DIR/foundryup" ]]; then
-        "$FOUNDRY_BIN_DIR/foundryup"
+    if [[ -f "$HOME/.foundry/bin/foundryup" ]]; then
+        "$HOME/.foundry/bin/foundryup"
     elif command -v foundryup >/dev/null 2>&1; then
         foundryup
     else
@@ -152,54 +205,12 @@ install_foundry() {
         return 1
     fi
     
-    # 重新初始化命令路径
-    initialize_commands
-    
-    if [[ -z "$CAST_CMD" ]]; then
+    if ! command -v cast >/dev/null 2>&1; then
         print_error "Foundry 安装后 cast 命令仍不可用"
         return 1
     fi
     
-    print_success "Foundry 安装完成: $($CAST_CMD --version 2>/dev/null || echo '未知版本')"
-    return 0
-}
-
-# ==================== 安装 Aztec CLI ====================
-install_aztec_cli() {
-    print_info "安装 Aztec CLI..."
-    
-    # 清理可能存在的旧安装
-    rm -rf "$AZTEC_BIN_DIR" 2>/dev/null || true
-    
-    # 安装 Aztec CLI
-    retry_cmd 3 bash -i <(curl -s --progress https://install.aztec.network)
-    
-    # 确保路径存在
-    export PATH="$AZTEC_BIN_DIR:$PATH"
-    echo 'export PATH="$HOME/.aztec/bin:$PATH"' >> ~/.bashrc
-    
-    # 更新到指定版本
-    print_info "更新到 v2.1.2..."
-    aztec-up 2.1.2
-    
-    sleep 5
-    
-    # 重新初始化命令路径
-    initialize_commands
-    
-    if [[ -z "$AZTEC_CMD" ]]; then
-        print_error "Aztec CLI 安装后 aztec 命令仍不可用"
-        return 1
-    fi
-    
-    local new_version=$($AZTEC_CMD --version 2>/dev/null || echo "未知")
-    print_success "Aztec CLI 安装完成 (版本: $new_version)"
-    
-    if ! $AZTEC_CMD validator-keys --help >/dev/null 2>&1; then
-        print_error "validator-keys 命令不可用"
-        return 1
-    fi
-    
+    print_success "Foundry 安装完成: $(cast --version 2>/dev/null || echo '未知版本')"
     return 0
 }
 
@@ -208,10 +219,10 @@ install_dependencies() {
     print_info "安装系统依赖..."
     
     print_info "更新系统包..."
-    retry_cmd 3 apt update -y -qq && apt upgrade -y -qq
+    retry_cmd 3 apt update -y && apt upgrade -y
     
     print_info "安装基础工具..."
-    apt install -y -qq curl jq iptables build-essential git wget lz4 make gcc nano \
+    apt install -y curl jq iptables build-essential git wget lz4 make gcc nano \
         automake autoconf tmux htop nvme-cli libgbm1 pkg-config libssl-dev \
         libleveldb-dev tar clang bsdmainutils ncdu unzip ca-certificates \
         gnupg lsb-release bc
@@ -223,48 +234,39 @@ install_dependencies() {
         curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
         chmod a+r /etc/apt/keyrings/docker.gpg
         echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-        apt-get update -qq
-        apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+        apt-get update
+        apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
         systemctl enable docker
         systemctl start docker
         usermod -aG docker root
         sleep 5
-        docker run hello-world >/dev/null 2>&1 || print_warning "Docker 测试失败，请手动检查"
+        docker run --rm hello-world >/dev/null 2>&1 || print_warning "Docker 测试失败，请手动检查"
         print_success "Docker 安装完成"
     else
         print_info "Docker 已存在"
     fi
-    
-    # 重新初始化命令路径
-    initialize_commands
 }
 
 # ==================== 环境检查 ====================
 check_environment() {
     print_info "检查环境..."
     
-    # 首先初始化命令路径
-    if ! initialize_commands; then
-        print_error "命令路径初始化失败"
-        return 1
-    fi
-    
     # 检查必要命令
     local missing=()
     
-    if ! command -v docker >/dev/null 2>&1 && [[ -z "$DOCKER_CMD" ]]; then
+    if ! command -v docker >/dev/null 2>&1; then
         missing+=("docker")
     fi
     
-    if ! command -v jq >/dev/null 2>&1 && [[ -z "$JQ_CMD" ]]; then
+    if ! command -v jq >/dev/null 2>&1; then
         missing+=("jq")
     fi
     
-    if ! command -v cast >/dev/null 2>&1 && [[ -z "$CAST_CMD" ]]; then
+    if ! command -v cast >/dev/null 2>&1; then
         missing+=("cast")
     fi
     
-    if ! command -v aztec >/dev/null 2>&1 && [[ -z "$AZTEC_CMD" ]]; then
+    if ! command -v aztec >/dev/null 2>&1; then
         missing+=("aztec")
     fi
     
@@ -273,7 +275,7 @@ check_environment() {
         install_dependencies
         
         # 安装 Foundry 如果需要
-        if [[ " ${missing[*]} " == *"cast"* ]] && [[ -z "$CAST_CMD" ]]; then
+        if [[ " ${missing[*]} " == *"cast"* ]]; then
             if ! install_foundry; then
                 print_error "Foundry 安装失败"
                 return 1
@@ -281,7 +283,7 @@ check_environment() {
         fi
         
         # 安装 Aztec CLI 如果需要
-        if [[ " ${missing[*]} " == *"aztec"* ]] && [[ -z "$AZTEC_CMD" ]]; then
+        if [[ " ${missing[*]} " == *"aztec"* ]]; then
             if ! install_aztec_cli; then
                 print_error "Aztec CLI 安装失败"
                 return 1
@@ -293,15 +295,15 @@ check_environment() {
     print_info "最终环境验证..."
     echo "Docker: $(command -v docker || echo '未找到')"
     echo "jq: $(command -v jq || echo '未找到')"
-    echo "cast: ${CAST_CMD:-未找到}"
-    echo "aztec: ${AZTEC_CMD:-未找到}"
+    echo "cast: $(command -v cast || echo '未找到')"
+    echo "aztec: $(command -v aztec || echo '未找到')"
     
     # 检查 Aztec CLI 版本和功能
-    if [[ -n "$AZTEC_CMD" ]]; then
-        local aztec_version=$($AZTEC_CMD --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "0.0.0")
+    if command -v aztec >/dev/null 2>&1; then
+        local aztec_version=$(aztec --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "0.0.0")
         print_info "当前 Aztec CLI 版本: $aztec_version"
         
-        if [[ "$aztec_version" < "2.1.2" ]] || ! $AZTEC_CMD validator-keys --help >/dev/null 2>&1; then
+        if [[ "$aztec_version" < "2.1.2" ]] || ! aztec validator-keys --help >/dev/null 2>&1; then
             print_warning "Aztec CLI 版本过旧或功能不全，重新安装..."
             if ! install_aztec_cli; then
                 print_error "Aztec CLI 重新安装失败"
@@ -309,6 +311,10 @@ check_environment() {
             fi
         fi
     fi
+    
+    # 重新加载环境变量
+    source ~/.bashrc 2>/dev/null || true
+    source ~/.profile 2>/dev/null || true
     
     print_success "环境检查通过"
     return 0
@@ -327,13 +333,7 @@ generate_address_from_private_key() {
     fi
     private_key="0x$private_key"  # 恢复0x
     
-    # 使用 CAST_CMD
-    if [[ -n "$CAST_CMD" ]]; then
-        address=$($CAST_CMD wallet address --private-key "$private_key" 2>/dev/null || echo "")
-    else
-        print_error "cast 命令不可用"
-        return 1
-    fi
+    address=$(cast wallet address --private-key "$private_key" 2>/dev/null || echo "")
     
     if [[ -z "$address" || ! "$address" =~ ^0x[a-fA-F0-9]{40}$ ]]; then
         print_warning "cast 失败，尝试 SHA3-256 fallback..."
@@ -358,8 +358,8 @@ load_existing_keystore() {
     fi
     
     local new_eth_key new_bls_key new_address
-    new_eth_key=$($JQ_CMD -r '.validators[0].attester.eth' "$keystore_path")
-    new_bls_key=$($JQ_CMD -r '.validators[0].attester.bls' "$keystore_path")
+    new_eth_key=$(jq -r '.validators[0].attester.eth' "$keystore_path")
+    new_bls_key=$(jq -r '.validators[0].attester.bls' "$keystore_path")
     
     if [[ -z "$new_eth_key" || "$new_eth_key" == "null" ]]; then
         print_error "ETH 私钥读取失败"
@@ -417,7 +417,7 @@ reliable_stake_balance_check() {
     
     for rpc in "${reliable_rpcs[@]}"; do
         print_info "尝试 RPC: $(echo "$rpc" | sed 's|https://||')"
-        balance_hex=$($CAST_CMD call "$STAKE_TOKEN" "balanceOf(address)(uint256)" "$address" --rpc-url "$rpc" 2>/dev/null || echo "0x0")
+        balance_hex=$(cast call "$STAKE_TOKEN" "balanceOf(address)(uint256)" "$address" --rpc-url "$rpc" 2>/dev/null || echo "0x0")
         
         if [[ "$balance_hex" != "0x0" && "$balance_hex" != "0x" ]]; then
             balance=$(printf "%d" "$balance_hex" 2>/dev/null || echo "0")
@@ -441,7 +441,7 @@ reliable_stake_balance_check() {
     
     # 如果所有 RPC 都失败，使用原始 RPC 作为后备
     print_warning "所有可靠 RPC 失败，使用原始 RPC 作为后备..."
-    balance_hex=$($CAST_CMD call "$STAKE_TOKEN" "balanceOf(address)(uint256)" "$address" --rpc-url "$eth_rpc" 2>/dev/null || echo "0x0")
+    balance_hex=$(cast call "$STAKE_TOKEN" "balanceOf(address)(uint256)" "$address" --rpc-url "$eth_rpc" 2>/dev/null || echo "0x0")
     balance=$(printf "%d" "$balance_hex" 2>/dev/null || echo "0")
     formatted_balance=$(echo "scale=0; $balance / 1000000000000000000" | bc 2>/dev/null || echo "0")
     
@@ -471,7 +471,7 @@ extract_tx_hash() {
     
     # 方法3: 从 JSON 格式提取
     if [[ -z "$tx_hash" ]]; then
-        tx_hash=$(echo "$output" | $JQ_CMD -r '.transactionHash' 2>/dev/null || echo "")
+        tx_hash=$(echo "$output" | jq -r '.transactionHash' 2>/dev/null || echo "")
     fi
     
     # 验证哈希格式
@@ -493,7 +493,7 @@ wait_for_transaction() {
     
     for ((i=1; i<=max_attempts; i++)); do
         local receipt
-        receipt=$($CAST_CMD receipt "$tx_hash" --rpc-url "$rpc_url" 2>/dev/null || echo "")
+        receipt=$(cast receipt "$tx_hash" --rpc-url "$rpc_url" 2>/dev/null || echo "")
         
         if [[ -n "$receipt" && "$receipt" != "null" ]]; then
             # 检查交易状态
@@ -552,7 +552,7 @@ check_stake_balance_and_approve() {
     
     print_info "检查 STAKE 授权..."
     local allowance_hex
-    allowance_hex=$($CAST_CMD call "$STAKE_TOKEN" "allowance(address,address)(uint256)" "$funding_address" "$ROLLUP_CONTRACT" --rpc-url "$eth_rpc" 2>/dev/null || echo "0x0")
+    allowance_hex=$(cast call "$STAKE_TOKEN" "allowance(address,address)(uint256)" "$funding_address" "$ROLLUP_CONTRACT" --rpc-url "$eth_rpc" 2>/dev/null || echo "0x0")
     local allowance=$(printf "%d" "$allowance_hex" 2>/dev/null || echo "0")
     local formatted_allowance=$(echo "scale=0; $allowance / 1000000000000000000" | bc 2>/dev/null || echo "0")
     
@@ -568,7 +568,7 @@ check_stake_balance_and_approve() {
         
         # 执行授权交易
         local tx_output
-        tx_output=$($CAST_CMD send "$STAKE_TOKEN" "approve(address,uint256)" \
+        tx_output=$(cast send "$STAKE_TOKEN" "approve(address,uint256)" \
             "$ROLLUP_CONTRACT" "200000000000000000000000" \
             --private-key "$funding_private_key" --rpc-url "$eth_rpc" --gas-price 2gwei 2>&1)
         
@@ -584,7 +584,7 @@ check_stake_balance_and_approve() {
             if wait_for_transaction "$tx_hash" "$eth_rpc"; then
                 # 检查授权结果
                 sleep 5  # 额外等待确保状态更新
-                allowance_hex=$($CAST_CMD call "$STAKE_TOKEN" "allowance(address,address)(uint256)" "$funding_address" "$ROLLUP_CONTRACT" --rpc-url "$eth_rpc" 2>/dev/null || echo "0x0")
+                allowance_hex=$(cast call "$STAKE_TOKEN" "allowance(address,address)(uint256)" "$funding_address" "$ROLLUP_CONTRACT" --rpc-url "$eth_rpc" 2>/dev/null || echo "0x0")
                 allowance=$(printf "%d" "$allowance_hex" 2>/dev/null || echo "0")
                 formatted_allowance=$(echo "scale=0; $allowance / 1000000000000000000" | bc 2>/dev/null || echo "0")
                 
@@ -646,7 +646,7 @@ check_eth_balance() {
     local min_eth=0.2
     local balance_eth
     
-    balance_eth=$($CAST_CMD balance "$address" --rpc-url "$eth_rpc" | sed 's/.* \([0-9.]*\) eth.*/\1/' || echo "0")
+    balance_eth=$(cast balance "$address" --rpc-url "$eth_rpc" | sed 's/.* \([0-9.]*\) eth.*/\1/' || echo "0")
     
     if [[ $(echo "$balance_eth >= $min_eth" | bc -l 2>/dev/null || echo "0") -eq 1 ]]; then
         print_success "ETH 充足 ($balance_eth ETH)"
@@ -707,9 +707,9 @@ install_and_start_node() {
         1)
             print_info "生成新密钥..."
             rm -rf "$HOME/.aztec/keystore" 2>/dev/null || true
-            $AZTEC_CMD validator-keys new --fee-recipient 0x0000000000000000000000000000000000000000000000000000000000000000
-            new_eth_key=$($JQ_CMD -r '.validators[0].attester.eth' "$DEFAULT_KEYSTORE")
-            new_bls_key=$($JQ_CMD -r '.validators[0].attester.bls' "$DEFAULT_KEYSTORE")
+            aztec validator-keys new --fee-recipient 0x0000000000000000000000000000000000000000000000000000000000000000
+            new_eth_key=$(jq -r '.validators[0].attester.eth' "$DEFAULT_KEYSTORE")
+            new_bls_key=$(jq -r '.validators[0].attester.bls' "$DEFAULT_KEYSTORE")
             new_address=$(generate_address_from_private_key "$new_eth_key")
             print_success "新地址: $new_address"
             echo ""
@@ -803,14 +803,14 @@ EOF
 
     print_info "启动节点..."
     cd "$AZTEC_DIR"
-    $DOCKER_CMD compose up -d
+    docker compose up -d
     sleep 10  # 等待启动
     print_info "启动后日志（最近20行）："
-    $DOCKER_CMD logs aztec-sequencer --tail 20
+    docker logs aztec-sequencer --tail 20
     echo ""
     
     local api_status=$(curl -s http://localhost:8080/status 2>/dev/null || echo "")
-    if [[ -n "$api_status" && $($JQ_CMD -e '.error == null' <<< "$api_status" 2>/dev/null) == "true" ]]; then
+    if [[ -n "$api_status" && $(jq -e '.error == null' <<< "$api_status" 2>/dev/null) == "true" ]]; then
         print_success "节点启动成功！API 响应正常。"
     else
         print_warning "节点启动中... API 暂无响应（正常，等待同步）。日志: $api_status"
@@ -821,7 +821,7 @@ EOF
 
     echo ""
     print_success "部署完成！"
-    echo "日志: $DOCKER_CMD logs -f aztec-sequencer"
+    echo "日志: docker logs -f aztec-sequencer"
     echo "状态: curl http://localhost:8080/status"
     read -p "按任意键继续..."
 }
@@ -908,7 +908,7 @@ register_validator() {
     
     echo ""
     print_info "执行注册验证者..."
-    $AZTEC_CMD add-l1-validator --l1-rpc-urls "$ETH_RPC" --network testnet --private-key "$FUNDING_PRIVATE_KEY" --attester "$new_address" --withdrawer "$new_address" --bls-secret-key "$new_bls_key" --rollup "$ROLLUP_CONTRACT"
+    aztec add-l1-validator --l1-rpc-urls "$ETH_RPC" --network testnet --private-key "$FUNDING_PRIVATE_KEY" --attester "$new_address" --withdrawer "$new_address" --bls-secret-key "$new_bls_key" --rollup "$ROLLUP_CONTRACT"
     
     print_success "注册成功！"
     echo "队列检查: $DASHTEC_URL/validator/$new_address"
@@ -917,19 +917,19 @@ register_validator() {
 
 # ==================== 查看日志和状态 ====================
 view_logs_and_status() {
-    if $DOCKER_CMD ps | grep -q aztec-sequencer; then
+    if docker ps | grep -q aztec-sequencer; then
         echo "节点运行中"
-        $DOCKER_CMD logs --tail 100 aztec-sequencer
+        docker logs --tail 100 aztec-sequencer
         echo ""
         local api_status=$(curl -s http://localhost:8080/status 2>/dev/null || echo "")
-        if [[ -n "$api_status" && $($JQ_CMD -e '.error == null' <<< "$api_status" 2>/dev/null) == "true" ]]; then
+        if [[ -n "$api_status" && $(jq -e '.error == null' <<< "$api_status" 2>/dev/null) == "true" ]]; then
             echo "$api_status"
             print_success "API 响应正常！"
         else
             echo "$api_status"
             print_error "API 响应异常或无响应！"
         fi
-        local error_logs=$($DOCKER_CMD logs --tail 100 aztec-sequencer 2>/dev/null | grep -E "(ERROR|WARN|FATAL|failed to|connection refused|timeout|sync failed|RPC error|P2P error|disconnected.*failed)" | grep -v -E "(no blocks|too far into slot|rate limit exceeded|yamux error)")
+        local error_logs=$(docker logs --tail 100 aztec-sequencer 2>/dev/null | grep -E "(ERROR|WARN|FATAL|failed to|connection refused|timeout|sync failed|RPC error|P2P error|disconnected.*failed)" | grep -v -E "(no blocks|too far into slot|rate limit exceeded|yamux error)")
         local error_count=$(echo "$error_logs" | wc -l)
         if [[ "$error_count" -eq 0 ]]; then
             print_success "日志正常，无明显错误！（P2P活跃，同步稳定）"
@@ -942,7 +942,7 @@ view_logs_and_status() {
         read -r realtime_choice
         if [[ "$realtime_choice" == "y" || "$realtime_choice" == "Y" ]]; then
             print_info "实时日志（按 Ctrl+C 停止）..."
-            $DOCKER_CMD logs -f aztec-sequencer
+            docker logs -f aztec-sequencer
         fi
     else
         print_error "节点未运行！"
@@ -963,21 +963,21 @@ update_and_restart_node() {
     
     print_info "检查并拉取最新 Aztec 镜像..."
     cd "$AZTEC_DIR"
-    local old_image=$($DOCKER_CMD inspect aztec-sequencer --format '{{.Config.Image}}' 2>/dev/null || echo "未知")
+    local old_image=$(docker inspect aztec-sequencer --format '{{.Config.Image}}' 2>/dev/null || echo "未知")
     print_info "当前镜像: $old_image"
-    $DOCKER_CMD compose pull aztec-sequencer --quiet
+    docker compose pull aztec-sequencer --quiet
     print_success "镜像拉取完成！"
     print_warning "重启节点（可能有短暂中断）..."
-    $DOCKER_CMD compose up -d
+    docker compose up -d
     sleep 10
-    local new_image=$($DOCKER_CMD inspect aztec-sequencer --format '{{.Config.Image}}' 2>/dev/null || echo "未知")
+    local new_image=$(docker inspect aztec-sequencer --format '{{.Config.Image}}' 2>/dev/null || echo "未知")
     if [[ "$old_image" != "$new_image" ]]; then
         print_success "更新成功！新镜像: $new_image"
     else
         print_info "无新版本可用。"
     fi
     print_info "重启后日志（最近20行）："
-    $DOCKER_CMD logs aztec-sequencer --tail 20
+    docker logs aztec-sequencer --tail 20
     echo ""
     print_success "更新和重启完成！"
     read -p "按 [Enter] 继续..."
@@ -996,11 +996,11 @@ monitor_performance() {
     echo "CPU 使用率: $(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 | awk '{printf "%.1f%%\n", $1}')"
     echo "磁盘使用: $(df -h / | awk 'NR==2 {printf "%.1f%% 已用 (%s 可用)", $5, $4}')"
     echo "网络 I/O (最近1min): $(cat /proc/net/dev | grep eth0 | awk '{print "接收: " $2/1024/1024 "MB, 发送: " $10/1024/1024 "MB"}' 2>/dev/null || echo "网络接口未找到")"
-    if $DOCKER_CMD ps | grep -q aztec-sequencer; then
+    if docker ps | grep -q aztec-sequencer; then
         print_info "=== Aztec 容器性能 ==="
-        $DOCKER_CMD stats aztec-sequencer --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}" | tail -n1
+        docker stats aztec-sequencer --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}" | tail -n1
         print_info "Aztec API 响应时间 (ms): $(curl -s -w "%{time_total}" -o /dev/null http://localhost:8080/status 2>/dev/null || echo "N/A")"
-        local peers=$(curl -s http://localhost:8080/status 2>/dev/null | $JQ_CMD -r '.peers // empty' || echo "N/A")
+        local peers=$(curl -s http://localhost:8080/status 2>/dev/null | jq -r '.peers // empty' || echo "N/A")
         echo "P2P 连接数: $peers"
     else
         print_warning "Aztec 容器未运行，无法监控容器指标。"
