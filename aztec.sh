@@ -43,8 +43,21 @@ fix_environment() {
   done
   
   if [ ${#missing_cmds[@]} -gt 0 ]; then
-    print_error "缺少命令: ${missing_cmds[*]}"
-    return 1
+    print_error "缺少命令: ${missing_cmds[*]}，正在自动安装..."
+    install_dependencies  # 新增：自动安装缺失依赖
+    
+    # 重新验证安装后状态
+    missing_cmds=()
+    for cmd in docker jq cast aztec; do
+      if ! command -v "$cmd" >/dev/null 2>&1; then
+        missing_cmds+=("$cmd")
+      fi
+    done
+    
+    if [ ${#missing_cmds[@]} -gt 0 ]; then
+      print_error "安装后仍缺少: ${missing_cmds[*]}，请手动检查网络/权限"
+      return 1
+    fi
   fi
   
   print_success "环境变量修复完成"
@@ -511,12 +524,6 @@ install_and_start_node() {
   print_info "Aztec 测试网节点安装 (修复版) - v2.1.2 兼容"
   echo "=========================================="
   
-  # 先修复环境
-  if ! fix_environment; then
-    print_error "环境修复失败"
-    return 1
-  fi
-  
   if ! check_environment; then
     return 1
   fi
@@ -681,12 +688,6 @@ register_validator() {
   clear
   print_info "单独注册验证者 - v2.1.2 兼容"
   echo "=========================================="
-  
-  # 先修复环境
-  if ! fix_environment; then
-    print_error "环境修复失败"
-    return 1
-  fi
   
   if ! check_environment; then
     return 1
