@@ -88,15 +88,100 @@ generate_address_from_private_key() {
 check_eth_balance() {
     local eth_rpc=$1
     local address=$2
-    local balance_eth=$(cast balance "$address" --rpc-url "$eth_rpc" 2>/dev/null | grep -oE '[0-9.]+' | head -1 || echo "0")
+    local min_eth=${3:-0.2}
     
-    if [[ $(echo "$balance_eth >= 0.2" | bc -l 2>/dev/null || echo "0") -eq 1 ]]; then
+    local balance_wei=$(cast balance "$address" --rpc-url "$eth_rpc" 2>/dev/null | grep -oE '[0-9]+' | head -1 || echo "0")
+    local balance_eth=$(echo "scale=4; $balance_wei / 1000000000000000000" | bc 2>/dev/null || echo "0")
+    
+    if (( $(echo "$balance_eth >= $min_eth" | bc -l 2>/dev/null || echo "0") )); then
         print_success "ETH 充足 ($balance_eth ETH)"
         return 0
     else
-        print_warning "ETH 不足 ($balance_eth ETH)，需至少 0.2 ETH 用于 gas"
+        print_warning "ETH 不足 ($balance_eth ETH)，需至少 $min_eth ETH"
         return 1
     fi
+}
+
+# ==================== 检查 STAKE 余额 ====================
+check_stake_balance() {
+    local eth_rpc=$1
+    local address=$2
+    
+    print_info "检查 STAKE 余额..."
+    local balance_hex=$(cast call "$STAKE_TOKEN" "balanceOf(address)(uint256)" "$address" --rpc-url "$eth_rpc" 2>/dev/null || echo "0x0")
+    local balance=$(printf "%d" "$balance_hex" 2>/dev/null || echo "0")
+    local formatted_balance=$(echo "scale=0; $balance / 1000000000000000000" | bc 2>/dev/null || echo "0")
+    
+    if [[ "$balance" -ge "$STAKE_AMOUNT" ]]; then
+        print_success "STAKE 余额充足: $formatted_balance STAKE"
+        return 0
+    else
+        print_error "STAKE 余额不足: $formatted_balance STAKE (需要 200k)"
+        return 1
+    fi
+}
+
+# ==================== 检查 STAKE 授权 ====================
+check_stake_allowance() {
+    local eth_rpc=$1
+    local address=$2
+    
+    print_info "检查 STAKE 授权..."
+    local allowance_hex=$(cast call "$STAKE_TOKEN" "allowance(address,address)(uint256)" "$address" "$ROLLUP_CONTRACT" --rpc-url "$eth_rpc" 2>/dev/null || echo "0x0")
+    local allowance=$(printf "%d" "$allowance_hex" 2>/dev/null || echo "0")
+    local formatted_allowance=$(echo "scale=0; $allowance / 1000000000000000000" | bc 2>/dev/null || echo "0")
+    
+    if [[ "$allowance" -ge "$STAKE_AMOUNT" ]]; then
+        print_success "STAKE 已授权: $formatted_allowance STAKE"
+        return 0
+    else
+        print_warning "STAKE 未授权或额度不足: $formatted_allowance STAKE"
+        return 1
+    fi
+}
+
+# ==================== 授权 STAKE ====================
+approve_stake() {
+    local eth_rpc=$1
+    local private_key=$2
+    
+    print_info "执行 STAKE 授权..."
+    
+    for attempt in {1..3}; do
+        print_info "授权尝试 $attempt/3..."
+        
+        if cast send "$STAKE_TOKEN" \
+            "approve(address,uint256)" \
+            "$ROLLUP_CONTRACT" \
+            "200000000000000000000000" \
+            --private-key "$private_key" \
+            --rpc-url "$eth_rpc" \
+            --gas-price 2gwei; then
+            
+            print_success "✅ 授权交易发送成功"
+            
+            # 等待交易确认
+            print_info "等待交易确认..."
+            sleep 10
+            
+            # 验证授权结果
+            if check_stake_allowance "$eth_rpc" "$(generate_address_from_private_key "$private_key")"; then
+                print_success "✅ STAKE 授权成功"
+                return 0
+            else
+                print_warning "交易已确认但授权未生效，重试..."
+            fi
+        else
+            print_warning "授权交易失败，重试..."
+        fi
+        
+        if [[ $attempt -lt 3 ]]; then
+            sleep 5
+        fi
+    done
+    
+    print_error "❌ STAKE 授权失败"
+    return 1
 }
 
 # ==================== 清理现有容器 ====================
@@ -353,6 +438,212 @@ EOF
     return 0
 }
 
+# ==================== 优化的注册验证者函数 ====================
+register_validator_optimized() {
+    clear
+    print_info "Aztec 验证者注册 (优化版)"
+    echo "=========================================="
+    
+    if ! check_environment; then
+        print_error "环境检查失败"
+        read -p "按任意键返回菜单..."
+        return 1
+    fi
+    
+    echo ""
+    echo "请提供注册信息："
+    
+    read -p "L1 RPC URL (推荐: https://rpc.sepolia.org): " ETH_RPC
+    ETH_RPC=${ETH_RPC:-"https://rpc.sepolia.org"}
+    echo
+    
+    read -sp "Funding 私钥 (必须有 200k STAKE 和 ETH): " FUNDING_PRIVATE_KEY
+    echo
+    echo
+    
+    if [[ -z "$FUNDING_PRIVATE_KEY" || ! "$FUNDING_PRIVATE_KEY" =~ ^0x[a-fA-F0-9]{64}$ ]]; then
+        print_error "私钥格式错误"
+        read -p "按任意键返回菜单..."
+        return 1
+    fi
+    
+    # 生成 funding 地址
+    local funding_address
+    funding_address=$(generate_address_from_private_key "$FUNDING_PRIVATE_KEY")
+    print_info "Funding 地址: $funding_address"
+    
+    # 检查余额
+    echo ""
+    print_info "检查余额..."
+    if ! check_eth_balance "$ETH_RPC" "$funding_address" "0.2"; then
+        print_error "ETH 余额不足，无法继续注册"
+        read -p "按任意键返回菜单..."
+        return 1
+    fi
+    
+    if ! check_stake_balance "$ETH_RPC" "$funding_address"; then
+        print_error "STAKE 余额不足，无法继续注册"
+        read -p "按任意键返回菜单..."
+        return 1
+    fi
+    
+    # 检查并授权 STAKE
+    echo ""
+    if ! check_stake_allowance "$ETH_RPC" "$funding_address"; then
+        if ! approve_stake "$ETH_RPC" "$FUNDING_PRIVATE_KEY"; then
+            print_error "STAKE 授权失败，无法继续注册"
+            read -p "按任意键返回菜单..."
+            return 1
+        fi
+    fi
+    
+    # 选择验证者密钥
+    echo ""
+    print_info "选择验证者密钥："
+    echo "1. 使用现有节点密钥"
+    echo "2. 生成新密钥"
+    echo "3. 加载 keystore.json"
+    read -p "请选择 (1-3): " key_choice
+    
+    local validator_eth_key validator_bls_key validator_address
+    
+    case $key_choice in
+        1)
+            # 使用现有节点密钥
+            if [ -f "$AZTEC_DIR/.env" ]; then
+                validator_eth_key=$(grep "VALIDATOR_PRIVATE_KEY" "$AZTEC_DIR/.env" | cut -d'=' -f2)
+                validator_address=$(grep "COINBASE" "$AZTEC_DIR/.env" | cut -d'=' -f2)
+                if [[ -n "$validator_eth_key" && -n "$validator_address" ]]; then
+                    print_success "使用节点配置的密钥"
+                    print_info "地址: $validator_address"
+                    
+                    # 需要用户提供 BLS 密钥
+                    read -p "请输入该地址对应的 BLS 私钥: " validator_bls_key
+                    if [[ -z "$validator_bls_key" ]]; then
+                        print_error "BLS 私钥不能为空"
+                        read -p "按任意键返回菜单..."
+                        return 1
+                    fi
+                else
+                    print_error "无法读取节点密钥"
+                    read -p "按任意键返回菜单..."
+                    return 1
+                fi
+            else
+                print_error "节点配置文件不存在"
+                read -p "按任意键返回菜单..."
+                return 1
+            fi
+            ;;
+        2)
+            # 生成新密钥
+            print_info "生成新验证者密钥..."
+            rm -rf "/tmp/aztec_register_keystore" 2>/dev/null
+            mkdir -p "/tmp/aztec_register_keystore"
+            
+            if aztec validator-keys new --fee-recipient 0x0000000000000000000000000000000000000000000000000000000000000000 --directory "/tmp/aztec_register_keystore"; then
+                local temp_keystore="/tmp/aztec_register_keystore/key1.json"
+                validator_eth_key=$(jq -r '.validators[0].attester.eth' "$temp_keystore")
+                validator_bls_key=$(jq -r '.validators[0].attester.bls' "$temp_keystore")
+                validator_address=$(generate_address_from_private_key "$validator_eth_key")
+                
+                print_success "新验证者地址: $validator_address"
+                echo ""
+                print_warning "=== 请保存这些密钥！ ==="
+                echo "ETH 私钥: $validator_eth_key"
+                echo "BLS 私钥: $validator_bls_key"
+                echo "地址: $validator_address"
+                echo ""
+                read -p "确认已保存后按 [Enter] 继续..."
+            else
+                print_error "生成密钥失败"
+                read -p "按任意键返回菜单..."
+                return 1
+            fi
+            ;;
+        3)
+            # 加载 keystore
+            read -p "请输入 keystore.json 路径: " keystore_path
+            if [[ -f "$keystore_path" ]]; then
+                validator_eth_key=$(jq -r '.validators[0].attester.eth' "$keystore_path")
+                validator_bls_key=$(jq -r '.validators[0].attester.bls' "$keystore_path")
+                validator_address=$(generate_address_from_private_key "$validator_eth_key")
+                print_success "加载成功！地址: $validator_address"
+            else
+                print_error "keystore 文件不存在"
+                read -p "按任意键返回菜单..."
+                return 1
+            fi
+            ;;
+        *)
+            print_error "无效选择"
+            read -p "按任意键返回菜单..."
+            return 1
+            ;;
+    esac
+    
+    # 检查验证者地址余额
+    echo ""
+    print_info "检查验证者地址余额..."
+    if ! check_eth_balance "$ETH_RPC" "$validator_address" "0.3"; then
+        print_warning "验证者地址 ETH 余额不足，建议转账 0.3-0.5 ETH"
+        echo "地址: $validator_address"
+        read -p "确认后按 [Enter] 继续..."
+    fi
+    
+    # 执行注册
+    echo ""
+    print_info "执行验证者注册..."
+    print_info "注册信息:"
+    echo "  - 验证者地址: $validator_address"
+    echo "  - Funding 地址: $funding_address"
+    echo "  - RPC: $ETH_RPC"
+    echo ""
+    
+    read -p "确认注册信息正确后按 [Enter] 开始注册..."
+    
+    if aztec add-l1-validator \
+        --l1-rpc-urls "$ETH_RPC" \
+        --network testnet \
+        --private-key "$FUNDING_PRIVATE_KEY" \
+        --attester "$validator_address" \
+        --withdrawer "$validator_address" \
+        --bls-secret-key "$validator_bls_key" \
+        --rollup "$ROLLUP_CONTRACT"; then
+        
+        echo ""
+        print_success "🎉 验证者注册成功！"
+        echo ""
+        echo "✅ 注册完成信息:"
+        echo "   - 验证者地址: $validator_address"
+        echo "   - Funding 地址: $funding_address"
+        echo "   - 网络: Sepolia Testnet"
+        echo ""
+        echo "📊 队列检查:"
+        echo "   $DASHTEC_URL/validator/$validator_address"
+        echo ""
+        echo "💡 下一步:"
+        echo "   1. 等待节点同步完成"
+        echo "   2. 监控验证者状态"
+        echo "   3. 确保节点持续运行"
+        
+    else
+        print_error "❌ 验证者注册失败"
+        echo ""
+        echo "可能的原因:"
+        echo "  1. 交易失败 (gas 不足或网络问题)"
+        echo "  2. 参数错误"
+        echo "  3. 网络连接问题"
+    fi
+    
+    # 清理临时文件
+    rm -rf "/tmp/aztec_register_keystore" 2>/dev/null
+    
+    echo ""
+    read -p "按任意键继续..."
+    return 0
+}
+
 # ==================== 简化的其他菜单功能 ====================
 view_logs_and_status() {
     clear
@@ -407,21 +698,8 @@ monitor_performance() {
 }
 
 register_validator() {
-    clear
-    print_info "注册验证者"
-    echo "=========================================="
-    echo "请先确保节点已安装并运行"
-    echo "使用选项7进行快速注册"
-    read -p "按任意键继续..."
-}
-
-register_validator_optimized() {
-    clear
-    print_info "快速注册验证者"
-    echo "=========================================="
-    echo "请运行单独的注册脚本或使用官方指南"
-    echo "参考: https://docs.aztec.network"
-    read -p "按任意键继续..."
+    # 重定向到优化版注册
+    register_validator_optimized
 }
 
 # ==================== 主菜单 ====================
@@ -436,10 +714,9 @@ main_menu() {
         echo "3. 更新并重启节点"
         echo "4. 性能监控"
         echo "5. 退出"
-        echo "6. 注册验证者"
-        echo "7. 快速注册验证者"
+        echo "6. 注册验证者 (推荐)"
         echo ""
-        read -p "请选择 (1-7): " choice
+        read -p "请选择 (1-6): " choice
         
         case $choice in
             1) install_and_start_node ;;
@@ -447,8 +724,7 @@ main_menu() {
             3) update_and_restart_node ;;
             4) monitor_performance ;;
             5) echo "再见！"; exit 0 ;;
-            6) register_validator ;;
-            7) register_validator_optimized ;;
+            6) register_validator_optimized ;;
             *) echo "无效选择，请重新输入"; sleep 1 ;;
         esac
     done
