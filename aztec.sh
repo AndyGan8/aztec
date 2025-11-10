@@ -456,7 +456,76 @@ reliable_stake_balance_check() {
     fi
 }
 
-# ==================== 检查 STAKE 授权和余额 ====================
+# ==================== 改进的交易哈希提取函数 ====================
+extract_tx_hash() {
+    local output="$1"
+    local tx_hash=""
+    
+    # 方法1: 从标准 Foundry 输出格式提取
+    tx_hash=$(echo "$output" | grep -oE 'transactionHash:[[:space:]]*(0x[a-fA-F0-9]{64})' | cut -d' ' -f2)
+    
+    # 方法2: 从常见格式提取
+    if [[ -z "$tx_hash" ]]; then
+        tx_hash=$(echo "$output" | grep -oE '0x[a-fA-F0-9]{64}' | head -1)
+    fi
+    
+    # 方法3: 从 JSON 格式提取
+    if [[ -z "$tx_hash" ]]; then
+        tx_hash=$(echo "$output" | $JQ_CMD -r '.transactionHash' 2>/dev/null || echo "")
+    fi
+    
+    # 验证哈希格式
+    if [[ -n "$tx_hash" && "${#tx_hash}" -eq 66 && "$tx_hash" =~ ^0x[a-fA-F0-9]{64}$ ]]; then
+        echo "$tx_hash"
+        return 0
+    else
+        return 1
+    fi
+}
+
+# ==================== 检查交易确认状态 ====================
+wait_for_transaction() {
+    local tx_hash="$1"
+    local rpc_url="$2"
+    local max_attempts=30
+    
+    print_info "等待交易确认: $tx_hash"
+    
+    for ((i=1; i<=max_attempts; i++)); do
+        local receipt
+        receipt=$($CAST_CMD receipt "$tx_hash" --rpc-url "$rpc_url" 2>/dev/null || echo "")
+        
+        if [[ -n "$receipt" && "$receipt" != "null" ]]; then
+            # 检查交易状态
+            local status
+            status=$(echo "$receipt" | grep -oE 'status:[[:space:]]*[0-9]+' | cut -d' ' -f2 || echo "")
+            
+            if [[ "$status" == "1" ]]; then
+                print_success "交易已确认并成功！"
+                return 0
+            elif [[ "$status" == "0" ]]; then
+                print_error "交易失败！"
+                return 1
+            else
+                print_success "交易已确认（状态未知）"
+                return 0
+            fi
+        fi
+        
+        if [[ $i -eq $max_attempts ]]; then
+            print_warning "交易确认超时，但继续流程..."
+            return 0
+        fi
+        
+        echo -n "."
+        sleep 3
+    done
+    
+    echo ""
+    return 0
+}
+
+# ==================== 修复的 STAKE 授权函数 ====================
 check_stake_balance_and_approve() {
     local eth_rpc=$1
     local funding_private_key=$2
@@ -493,30 +562,80 @@ check_stake_balance_and_approve() {
     fi
     
     print_warning "执行 STAKE 授权 (额度: 200k STAKE)..."
+    
     for attempt in 1 2 3; do
+        print_info "授权尝试 $attempt/3..."
+        
+        # 执行授权交易
+        local tx_output
+        tx_output=$($CAST_CMD send "$STAKE_TOKEN" "approve(address,uint256)" \
+            "$ROLLUP_CONTRACT" "200000000000000000000000" \
+            --private-key "$funding_private_key" --rpc-url "$eth_rpc" --gas-price 2gwei 2>&1)
+        
+        # 提取交易哈希
         local tx_hash
-        tx_hash=$($CAST_CMD send "$STAKE_TOKEN" "approve(address,uint256)" \
-            "$ROLLUP_CONTRACT" "200000ether" \
-            --private-key "$funding_private_key" --rpc-url "$eth_rpc" --gas-price 2gwei 2>&1 | grep -o '0x[a-fA-F0-9]\{66\}' || echo "")
+        tx_hash=$(extract_tx_hash "$tx_output")
         
         if [[ -n "$tx_hash" ]]; then
-            print_info "TX 发送: $tx_hash (查: https://sepolia.etherscan.io/tx/$tx_hash)"
-            sleep 10
+            print_success "交易发送成功！TX Hash: $tx_hash"
+            print_info "查看交易详情: https://sepolia.etherscan.io/tx/$tx_hash"
             
-            allowance_hex=$($CAST_CMD call "$STAKE_TOKEN" "allowance(address,address)(uint256)" "$funding_address" "$ROLLUP_CONTRACT" --rpc-url "$eth_rpc" 2>/dev/null || echo "0x0")
-            allowance=$(printf "%d" "$allowance_hex" 2>/dev/null || echo "0")
-            formatted_allowance=$(echo "scale=0; $allowance / 1000000000000000000" | bc 2>/dev/null || echo "0")
+            # 等待交易确认
+            if wait_for_transaction "$tx_hash" "$eth_rpc"; then
+                # 检查授权结果
+                sleep 5  # 额外等待确保状态更新
+                allowance_hex=$($CAST_CMD call "$STAKE_TOKEN" "allowance(address,address)(uint256)" "$funding_address" "$ROLLUP_CONTRACT" --rpc-url "$eth_rpc" 2>/dev/null || echo "0x0")
+                allowance=$(printf "%d" "$allowance_hex" 2>/dev/null || echo "0")
+                formatted_allowance=$(echo "scale=0; $allowance / 1000000000000000000" | bc 2>/dev/null || echo "0")
+                
+                if [[ "$allowance" -ge "$STAKE_AMOUNT" ]]; then
+                    print_success "授权成功！当前额度: $formatted_allowance STAKE"
+                    return 0
+                else
+                    print_warning "交易已确认但授权额度不足，当前: $formatted_allowance STAKE"
+                fi
+            else
+                print_warning "交易确认失败"
+            fi
+        else
+            print_warning "无法提取交易哈希，输出详情:"
+            echo "$tx_output"
             
-            if [[ "$allowance" -ge "$STAKE_AMOUNT" ]]; then
-                print_success "授权成功 (尝试 $attempt)！额度: $formatted_allowance STAKE"
-                return 0
+            # 检查是否是余额不足
+            if echo "$tx_output" | grep -qi "insufficient funds"; then
+                print_error "ETH 余额不足支付 gas 费用！"
+                return 1
             fi
         fi
-        print_warning "授权失败 (尝试 $attempt)，重试中..."
-        sleep 5
+        
+        if [[ $attempt -lt 3 ]]; then
+            print_warning "授权失败，10秒后重试..."
+            sleep 10
+        fi
     done
     
-    print_error "授权失败 3 次，请手动检查 gas/STAKE 余额或 RPC"
+    print_error "授权失败 3 次！"
+    echo ""
+    print_info "手动授权指南:"
+    echo "1. 检查私钥是否正确"
+    echo "2. 确保有足够的 ETH 支付 gas (至少 0.2 ETH)"
+    echo "3. 手动执行以下命令:"
+    echo "   cast send $STAKE_TOKEN \\"
+    echo "     \"approve(address,uint256)\" \\"
+    echo "     $ROLLUP_CONTRACT \\"
+    echo "     \"200000000000000000000000\" \\"
+    echo "     --private-key YOUR_PRIVATE_KEY \\"
+    echo "     --rpc-url $eth_rpc \\"
+    echo "     --gas-price 2gwei"
+    echo ""
+    echo "4. 然后检查授权:"
+    echo "   cast call $STAKE_TOKEN \\"
+    echo "     \"allowance(address,address)(uint256)\" \\"
+    echo "     $funding_address \\"
+    echo "     $ROLLUP_CONTRACT \\"
+    echo "     --rpc-url $eth_rpc"
+    
+    read -p "按 [Enter] 返回菜单手动处理..."
     return 1
 }
 
