@@ -14,6 +14,7 @@ ROLLUP_CONTRACT="0xebd99ff0ff6677205509ae73f93d0ca52ac85d67"
 STAKE_TOKEN="0x139d2a7a0881e16332d7D1F8DB383A4507E1Ea7A"
 DASHTEC_URL="https://dashtec.xyz"
 STAKE_AMOUNT=200000000000000000000000  # 200k wei (18 decimals)
+AZTEC_CLI_VERSION="2.0.2"  # 更新为当前稳定版本 (基于2025年文档)
 
 # ==================== 环境变量修复 ====================
 fix_environment() {
@@ -86,19 +87,19 @@ retry_cmd() {
 
 # ==================== 清理并重新安装 Aztec CLI ====================
 reinstall_aztec_cli() {
-  print_warning "Aztec CLI 版本过旧 (需 >=2.1.2)，正在删除并重新安装最新版 v2.1.2..."
+  print_warning "Aztec CLI 版本过旧 (需 >=$AZTEC_CLI_VERSION)，正在删除并重新安装最新版 $AZTEC_CLI_VERSION..."
   rm -rf "$HOME/.aztec"
   print_info "删除旧版完成"
   retry_cmd 3 bash -i <(curl -s --progress https://install.aztec.network)
   export PATH="$HOME/.aztec/bin:$PATH"
   print_info "基础安装完成"
-  print_info "更新到 v2.1.2..."
-  aztec-up 2.1.2
+  print_info "更新到 $AZTEC_CLI_VERSION..."
+  aztec-up "$AZTEC_CLI_VERSION"
   sleep 5
   local new_version=$(aztec --version 2>/dev/null || echo "未知")
   print_success "重新安装完成 (新版本: $new_version)"
   if ! aztec validator-keys --help >/dev/null 2>&1; then
-    print_error "v2.1.2 安装后 validator-keys 仍不可用！检查网络或手动 aztec-up 2.1.2"
+    print_error "$AZTEC_CLI_VERSION 安装后 validator-keys 仍不可用！检查网络或手动 aztec-up $AZTEC_CLI_VERSION"
     read -p "按 Enter 继续 (或 Ctrl+C 退出)..."
   fi
 }
@@ -148,10 +149,10 @@ install_dependencies() {
     reinstall_aztec_cli
   else
     print_info "Aztec CLI 已存在，检查更新..."
-    aztec-up 2.1.2
+    aztec-up "$AZTEC_CLI_VERSION"
     sleep 5
-    if [[ $(aztec --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "0.0.0") < "2.1.2" ]] || ! aztec validator-keys --help >/dev/null 2>&1; then
-      print_warning "版本 <2.1.2 或 validator-keys 不可用，正在重新安装 v2.1.2..."
+    if [[ $(aztec --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "0.0.0") < "$AZTEC_CLI_VERSION" ]] || ! aztec validator-keys --help >/dev/null 2>&1; then
+      print_warning "版本 <$AZTEC_CLI_VERSION 或 validator-keys 不可用，正在重新安装 $AZTEC_CLI_VERSION..."
       reinstall_aztec_cli
     fi
   fi
@@ -203,11 +204,11 @@ check_environment() {
   print_info "检查 Aztec CLI 版本和功能..."
   local aztec_version=$(aztec --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "0.0.0")
   print_info "当前 Aztec CLI 版本: $aztec_version"
-  if [[ "$aztec_version" < "2.1.2" ]] || ! aztec validator-keys --help >/dev/null 2>&1; then
-    print_error "Aztec CLI 版本 $aztec_version 过旧或不支持 'validator-keys' (需 >=2.1.2)。正在自动删除并重装..."
+  if [[ "$aztec_version" < "$AZTEC_CLI_VERSION" ]] || ! aztec validator-keys --help >/dev/null 2>&1; then
+    print_error "Aztec CLI 版本 $aztec_version 过旧或不支持 'validator-keys' (需 >=$AZTEC_CLI_VERSION)。正在自动删除并重装..."
     reinstall_aztec_cli
-    if [[ $(aztec --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "0.0.0") < "2.1.2" ]] || ! aztec validator-keys --help >/dev/null 2>&1; then
-      print_error "重装失败！手动: rm -rf ~/.aztec && bash -i <(curl -s https://install.aztec.network) && aztec-up 2.1.2"
+    if [[ $(aztec --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "0.0.0") < "$AZTEC_CLI_VERSION" ]] || ! aztec validator-keys --help >/dev/null 2>&1; then
+      print_error "重装失败！手动: rm -rf ~/.aztec && bash -i <(curl -s https://install.aztec.network) && aztec-up $AZTEC_CLI_VERSION"
       return 1
     fi
   fi
@@ -521,7 +522,7 @@ monitor_performance() {
 # ==================== 主安装流程 ====================
 install_and_start_node() {
   clear
-  print_info "Aztec 测试网节点安装 (修复版) - v2.1.2 兼容"
+  print_info "Aztec 测试网节点安装 (修复版) - v$AZTEC_CLI_VERSION 兼容 (2025 更新)"
   echo "=========================================="
   
   if ! check_environment; then
@@ -686,7 +687,7 @@ EOF
 # ==================== 单独注册验证者函数 ====================
 register_validator() {
   clear
-  print_info "单独注册验证者 - v2.1.2 兼容"
+  print_info "单独注册验证者 - v$AZTEC_CLI_VERSION 兼容"
   echo "=========================================="
   
   if ! check_environment; then
@@ -777,7 +778,7 @@ main_menu() {
   while true; do
     clear
     echo "========================================"
-    echo " Aztec 节点安装 (修复版) - v2.1.2"
+    echo " Aztec 节点安装 (修复版) - v$AZTEC_CLI_VERSION (2025)"
     echo "========================================"
     echo "1. 安装/启动节点 (先安装节点)"
     echo "2. 查看日志和状态"
