@@ -62,7 +62,7 @@ check_stk_allowance() {
       ],
       \"id\": 1
     }" "$rpc_url" | jq -r '.result')
-    if [[ "$allowance_hex" == "null" || "$allowance_hex" == "" || "$allowance_hex" == "0x" ]]; then echo "0"; else echo "$allowance_hex"; fi
+    if [[ "$allowance_hex" == "null" || "$allowance_hex" == "" || "$allowance_hex" == "0x" ]]; then echo "0x0"; else echo "$allowance_hex"; fi
 }
 
 # ==================== 发送 STK Approve ====================
@@ -269,22 +269,25 @@ register_validator_direct() {
     local funding_address=$(generate_address_from_private_key "$FUNDING_PRIVATE_KEY")
     print_info "Funding 地址: $funding_address"
     
-    # 可选：检查并执行 STK 授权 (如果不需要，注释掉)
+    # 检查并执行 STK 授权
     print_info "检查授权..."
     local allowance_hex=$(check_stk_allowance "$ETH_RPC" "$funding_address")
-    local allowance_dec=$(echo "ibase=16; ${allowance_hex#0x}" | bc 2>/dev/null || echo "0")  # 修正 bc 输入 (去掉 0x)
+    local allowance_dec=$(echo "ibase=16; ${allowance_hex#0x}" | bc 2>/dev/null || echo "0")
     local required_dec=200000000000000000000
-    print_info "当前授权: $((allowance_dec / 10**18)) STK"
+    local allowance_stk=$(echo "scale=0; $allowance_dec / 1000000000000000000" | bc 2>/dev/null || echo "0")
+    print_info "当前授权: $allowance_stk STK"
     
-    if [ "$allowance_dec" -lt "$required_dec" ]; then
+    if echo "$allowance_dec < $required_dec" | bc -l | grep -q 1; then
         print_warning "授权不足，执行 approve..."
         if ! send_stk_approve "$ETH_RPC" "$FUNDING_PRIVATE_KEY"; then
             print_error "Approve 失败，手动重试"
             read -p "按任意键..."; return 1
         fi
+    else
+        print_success "授权足够"
     fi
     
-    # 固定 attester/withdrawer (你的示例地址)
+    # 固定 attester/proposer (你的示例地址)
     local ATTESTER="0x188df4682a70262bdb316b02c56b31eb53e7c0cb"
     local PROPOSER_EOA="0x188df4682a70262bdb316b02c56b31eb53e7c0cb"
     
@@ -295,7 +298,7 @@ register_validator_direct() {
     echo "  L1 Chain ID: 11155111"
     read -p "确认执行？[Enter] 或 Ctrl+C 取消..."
     
-    # 执行修正后的命令 (移除 --yes, --network, --rollup, --bls-secret-key, --withdrawer -> --proposer-eoa; 添加 --staking-asset-handler 和 --l1-chain-id)
+    # 执行命令 (无 --yes, 使用正确选项)
     if aztec add-l1-validator \
         --l1-rpc-urls "$ETH_RPC" \
         --private-key "$FUNDING_PRIVATE_KEY" \
