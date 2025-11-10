@@ -15,8 +15,41 @@ STAKE_TOKEN="0x139d2a7a0881e16332d7D1F8DB383A4507E1Ea7A"
 DASHTEC_URL="https://dashtec.xyz"
 STAKE_AMOUNT=200000000000000000000000  # 200k wei (18 decimals)
 
-# ==================== 安全配置 ====================
-DEFAULT_KEYSTORE="$HOME/.aztec/keystore/key1.json"
+# ==================== 环境变量修复 ====================
+fix_environment() {
+  print_info "修复环境变量..."
+  
+  # 确保 Foundry 路径在 PATH 中
+  if [ -d "$HOME/.foundry/bin" ] && [[ ":$PATH:" != *":$HOME/.foundry/bin:"* ]]; then
+    export PATH="$HOME/.foundry/bin:$PATH"
+    echo 'export PATH="$HOME/.foundry/bin:$PATH"' >> ~/.bashrc
+  fi
+  
+  # 确保 Aztec 路径在 PATH 中
+  if [ -d "$HOME/.aztec/bin" ] && [[ ":$PATH:" != *":$HOME/.aztec/bin:"* ]]; then
+    export PATH="$HOME/.aztec/bin:$PATH"
+    echo 'export PATH="$HOME/.aztec/bin:$PATH"' >> ~/.bashrc
+  fi
+  
+  # 重新加载 bashrc
+  source ~/.bashrc 2>/dev/null || true
+  
+  # 验证关键命令
+  local missing_cmds=()
+  for cmd in docker jq cast aztec; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      missing_cmds+=("$cmd")
+    fi
+  done
+  
+  if [ ${#missing_cmds[@]} -gt 0 ]; then
+    print_error "缺少命令: ${missing_cmds[*]}"
+    return 1
+  fi
+  
+  print_success "环境变量修复完成"
+  return 0
+}
 
 # ==================== 打印函数 ====================
 print_info() { echo -e "\033[1;34m[INFO]\033[0m $1"; }
@@ -126,6 +159,13 @@ install_dependencies() {
 # ==================== 环境检查 ====================
 check_environment() {
   print_info "检查环境..."
+  
+  # 先修复环境变量
+  if ! fix_environment; then
+    print_error "环境变量修复失败"
+    return 1
+  fi
+  
   export PATH="$HOME/.foundry/bin:$HOME/.aztec/bin:$PATH"
   local missing=()
   for cmd in docker jq cast aztec; do
@@ -163,7 +203,7 @@ check_environment() {
   return 0
 }
 
-# ==================== 从私钥生成地址 (修复: 增强验证 + 调试) ====================
+# ==================== 从私钥生成地址 ====================
 generate_address_from_private_key() {
   local private_key=$1
   local address
@@ -228,60 +268,116 @@ load_existing_keystore() {
   return 0
 }
 
-# ==================== 检查 STAKE 授权和余额 (修复: 调试输出 + 手动跳过) ====================
+# ==================== 可靠的余额检查 ====================
+reliable_stake_balance_check() {
+  local eth_rpc=$1
+  local address=$2
+  
+  print_info "使用可靠 RPC 检查 STAKE 余额..."
+  
+  # 尝试多个可靠的公共 RPC
+  local reliable_rpcs=(
+    "https://rpc.sepolia.org"
+    "https://ethereum-sepolia-rpc.publicnode.com"
+    "https://sepolia.drpc.org"
+  )
+  
+  local balance_hex="0x0"
+  local balance=0
+  local formatted_balance=0
+  
+  for rpc in "${reliable_rpcs[@]}"; do
+    print_info "尝试 RPC: $rpc"
+    balance_hex=$(cast call "$STAKE_TOKEN" "balanceOf(address)(uint256)" "$address" --rpc-url "$rpc" 2>/dev/null || echo "0x0")
+    
+    if [[ "$balance_hex" != "0x0" && "$balance_hex" != "0x" ]]; then
+      balance=$(printf "%d" "$balance_hex" 2>/dev/null || echo "0")
+      formatted_balance=$(echo "scale=0; $balance / 1000000000000000000" | bc 2>/dev/null || echo "0")
+      
+      if [[ "$balance" -gt 0 ]]; then
+        print_success "从 $rpc 获取到余额: $formatted_balance STAKE"
+        
+        # 验证余额是否合理
+        if [[ "$balance" -ge "$STAKE_AMOUNT" ]]; then
+          print_success "STAKE 余额充足: $formatted_balance STAKE"
+          return 0
+        else
+          print_warning "STAKE 余额不足: $formatted_balance STAKE (需要 200k)"
+          return 1
+        fi
+      fi
+    fi
+    sleep 1
+  done
+  
+  # 如果所有 RPC 都失败，使用原始 RPC 作为后备
+  print_warning "所有可靠 RPC 失败，使用原始 RPC 作为后备..."
+  balance_hex=$(cast call "$STAKE_TOKEN" "balanceOf(address)(uint256)" "$address" --rpc-url "$eth_rpc" 2>/dev/null || echo "0x0")
+  balance=$(printf "%d" "$balance_hex" 2>/dev/null || echo "0")
+  formatted_balance=$(echo "scale=0; $balance / 1000000000000000000" | bc 2>/dev/null || echo "0")
+  
+  print_info "后备 RPC 余额: $formatted_balance STAKE"
+  
+  if [[ "$balance" -ge "$STAKE_AMOUNT" ]]; then
+    print_success "STAKE 余额充足: $formatted_balance STAKE"
+    return 0
+  else
+    print_error "STAKE 余额不足: $formatted_balance STAKE (需要 200k)"
+    return 1
+  fi
+}
+
+# ==================== 检查 STAKE 授权和余额 ====================
 check_stake_balance_and_approve() {
   local eth_rpc=$1
   local funding_private_key=$2
   local funding_address=$3
-  print_info "检查 STAKE 余额 (调试: 地址 $funding_address, RPC $eth_rpc)..."
-  local stake_balance_hex
-  stake_balance_hex=$(cast call "$STAKE_TOKEN" "balanceOf(address)(uint256)" "$funding_address" --rpc-url "$eth_rpc" 2>/dev/null || echo "0x0")
-  print_info "调试: Hex 余额 = $stake_balance_hex"
-  stake_balance=$(printf "%d" "$stake_balance_hex" 2>/dev/null || echo "0")
-  local formatted_balance
-  formatted_balance=$(echo "scale=0; $stake_balance / 1000000000000000000" | bc 2>/dev/null || echo "0")
-  print_info "当前 STAKE 余额: $formatted_balance STAKE"
-  if [[ "$stake_balance" -lt "$STAKE_AMOUNT" ]]; then
-    print_error "STAKE 余额不足！需要 200k STAKE，当前 $formatted_balance STAKE"
+  
+  print_info "检查 STAKE 余额和授权..."
+  
+  # 使用可靠的余额检查
+  if ! reliable_stake_balance_check "$eth_rpc" "$funding_address"; then
+    print_error "STAKE 余额不足！需要 200k STAKE"
     print_warning "请从 Faucet 获取: https://testnet.aztec.network/faucet"
     print_warning "升级提醒: 需要 ZKPassport 证明 (下载 App 并连接 Discord)"
     read -p "确认补充后按 [Enter] 继续 (或输入 'skip' 手动跳过)..."
     if [[ "$REPLY" == "skip" ]]; then
       print_warning "跳过余额检查，继续授权..."
-      return 0
-    fi
-    # 重新检查
-    stake_balance_hex=$(cast call "$STAKE_TOKEN" "balanceOf(address)(uint256)" "$funding_address" --rpc-url "$eth_rpc" 2>/dev/null || echo "0x0")
-    stake_balance=$(printf "%d" "$stake_balance_hex" 2>/dev/null || echo "0")
-    formatted_balance=$(echo "scale=0; $stake_balance / 1000000000000000000" | bc 2>/dev/null || echo "0")
-    if [[ "$stake_balance" -lt "$STAKE_AMOUNT" ]]; then
-      print_error "补充后仍不足，退出"
-      return 1
+    else
+      # 重新检查
+      if ! reliable_stake_balance_check "$eth_rpc" "$funding_address"; then
+        print_error "补充后仍不足，退出"
+        return 1
+      fi
     fi
   fi
+  
   print_info "检查 STAKE 授权..."
   local allowance_hex
   allowance_hex=$(cast call "$STAKE_TOKEN" "allowance(address,address)(uint256)" "$funding_address" "$ROLLUP_CONTRACT" --rpc-url "$eth_rpc" 2>/dev/null || echo "0x0")
-  print_info "调试: Hex 授权 = $allowance_hex"
-  allowance=$(printf "%d" "$allowance_hex" 2>/dev/null || echo "0")
-  local formatted_allowance
-  formatted_allowance=$(echo "scale=0; $allowance / 1000000000000000000" | bc 2>/dev/null || echo "0")
+  local allowance=$(printf "%d" "$allowance_hex" 2>/dev/null || echo "0")
+  local formatted_allowance=$(echo "scale=0; $allowance / 1000000000000000000" | bc 2>/dev/null || echo "0")
+  
   if [[ "$allowance" -ge "$STAKE_AMOUNT" ]]; then
     print_success "STAKE 已授权 (额度: $formatted_allowance STAKE)"
     return 0
   fi
+  
   print_warning "执行 STAKE 授权 (额度: 200k STAKE)..."
   for attempt in 1 2 3; do
     local tx_hash
     tx_hash=$(cast send "$STAKE_TOKEN" "approve(address,uint256)" \
       "$ROLLUP_CONTRACT" "200000ether" \
       --private-key "$funding_private_key" --rpc-url "$eth_rpc" --gas-price 2gwei 2>&1 | grep -o '0x[a-fA-F0-9]\{66\}' || echo "")
+    
     if [[ -n "$tx_hash" ]]; then
       print_info "TX 发送: $tx_hash (查: https://sepolia.etherscan.io/tx/$tx_hash)"
       sleep 10
+      
       allowance_hex=$(cast call "$STAKE_TOKEN" "allowance(address,address)(uint256)" "$funding_address" "$ROLLUP_CONTRACT" --rpc-url "$eth_rpc" 2>/dev/null || echo "0x0")
       allowance=$(printf "%d" "$allowance_hex" 2>/dev/null || echo "0")
       formatted_allowance=$(echo "scale=0; $allowance / 1000000000000000000" | bc 2>/dev/null || echo "0")
+      
       if [[ "$allowance" -ge "$STAKE_AMOUNT" ]]; then
         print_success "授权成功 (尝试 $attempt)！额度: $formatted_allowance STAKE"
         return 0
@@ -290,6 +386,7 @@ check_stake_balance_and_approve() {
     print_warning "授权失败 (尝试 $attempt)，重试中..."
     sleep 5
   done
+  
   print_error "授权失败 3 次，请手动检查 gas/STAKE 余额或 RPC"
   return 1
 }
@@ -408,14 +505,22 @@ monitor_performance() {
   done
 }
 
-# ==================== 主安装流程 (修改: 先安装节点，再可选注册) ====================
+# ==================== 主安装流程 ====================
 install_and_start_node() {
   clear
-  print_info "Aztec 测试网节点安装 (简化版，先安装节点) - v2.1.2 兼容"
+  print_info "Aztec 测试网节点安装 (修复版) - v2.1.2 兼容"
   echo "=========================================="
+  
+  # 先修复环境
+  if ! fix_environment; then
+    print_error "环境修复失败"
+    return 1
+  fi
+  
   if ! check_environment; then
     return 1
   fi
+  
   echo ""
   echo "请输入基础信息："
   read -p "L1 执行 RPC URL (推荐稳定: https://rpc.sepolia.org): " ETH_RPC
@@ -424,28 +529,33 @@ install_and_start_node() {
   echo
   read -p "Funding 私钥 (用于后续注册，必须有 200k STAKE 和 0.2 ETH): " FUNDING_PRIVATE_KEY
   echo ""
+  
   if [[ -n "$FUNDING_PRIVATE_KEY" && ! "$FUNDING_PRIVATE_KEY" =~ ^0x[a-fA-F0-9]{64}$ ]]; then
     print_error "私钥格式错误 (需 0x + 64 hex)"
     return 1
   fi
+  
   local funding_address
   if [[ -n "$FUNDING_PRIVATE_KEY" ]]; then
     funding_address=$(generate_address_from_private_key "$FUNDING_PRIVATE_KEY")
     if [[ -z "$funding_address" ]]; then return 1; fi
-    print_info "Funding 地址 (调试): $funding_address"
+    print_info "Funding 地址: $funding_address"
     print_warning "确认此地址有 200k STK (Etherscan: https://sepolia.etherscan.io/token/$STAKE_TOKEN?a=$funding_address)"
     read -p "地址匹配你的 OKX? (y/N): " addr_confirm
     [[ "$addr_confirm" != "y" && "$addr_confirm" != "Y" ]] && { print_error "地址不匹配，请修正私钥"; return 1; }
+    
     if ! check_eth_balance "$ETH_RPC" "$funding_address"; then
       print_warning "Funding 地址 ETH 不足，请补充 0.2 ETH"
       read -p "确认后继续..."
     fi
   fi
+  
   echo ""
   print_info "选择模式："
   echo "1. 生成新地址 (安装后使用选项6注册)"
   echo "2. 加载现有 keystore.json (安装后使用选项6注册)"
   read -p "请选择 (1-2): " mode_choice
+  
   local new_eth_key new_bls_key new_address
   case $mode_choice in
     1)
@@ -483,6 +593,7 @@ install_and_start_node() {
   print_info "设置节点环境（使用密钥: $new_address）..."
   mkdir -p "$AZTEC_DIR" "$DATA_DIR" "$KEY_DIR"
   local public_ip=$(curl -s ipv4.icanhazip.com || echo "127.0.0.1")
+  
   cat > "$AZTEC_DIR/.env" <<EOF
 DATA_DIRECTORY=./data
 KEY_STORE_DIRECTORY=./keys
@@ -496,6 +607,7 @@ AZTEC_ADMIN_PORT=8880
 VALIDATOR_PRIVATE_KEY=${new_eth_key}
 COINBASE=${new_address}
 EOF
+
   cat > "$AZTEC_DIR/docker-compose.yml" <<EOF
 services:
   aztec-sequencer:
@@ -538,6 +650,7 @@ networks:
   aztec:
     name: aztec
 EOF
+
   print_info "启动节点..."
   cd "$AZTEC_DIR"
   docker compose up -d
@@ -545,12 +658,14 @@ EOF
   print_info "启动后日志（最近20行）："
   docker logs aztec-sequencer --tail 20
   echo ""
+  
   local api_status=$(curl -s http://localhost:8080/status 2>/dev/null || echo "")
   if [[ -n "$api_status" && $(echo "$api_status" | jq -e '.error == null' 2>/dev/null) == "true" ]]; then
     print_success "节点启动成功！API 响应正常。"
   else
     print_warning "节点启动中... API 暂无响应（正常，等待同步）。日志: $api_status"
   fi
+  
   print_success "节点安装和启动完成！地址: $new_address"
   echo "注册请使用菜单选项6。队列: $DASHTEC_URL/validator/$new_address"
 
@@ -566,34 +681,47 @@ register_validator() {
   clear
   print_info "单独注册验证者 - v2.1.2 兼容"
   echo "=========================================="
+  
+  # 先修复环境
+  if ! fix_environment; then
+    print_error "环境修复失败"
+    return 1
+  fi
+  
   if ! check_environment; then
     return 1
   fi
+  
   echo ""
   echo "请输入注册信息："
   read -p "L1 执行 RPC URL (推荐: https://rpc.sepolia.org): " ETH_RPC
   echo
   read -p "Funding 私钥 (必须有 200k STAKE 和 0.2 ETH): " FUNDING_PRIVATE_KEY
   echo ""
+  
   if [[ -n "$FUNDING_PRIVATE_KEY" && ! "$FUNDING_PRIVATE_KEY" =~ ^0x[a-fA-F0-9]{64}$ ]]; then
     print_error "私钥格式错误 (需 0x + 64 hex)"
     return 1
   fi
+  
   local funding_address
   if [[ -n "$FUNDING_PRIVATE_KEY" ]]; then
     funding_address=$(generate_address_from_private_key "$FUNDING_PRIVATE_KEY")
     if [[ -z "$funding_address" ]]; then return 1; fi
     print_info "Funding 地址: $funding_address"
+    
     if ! check_eth_balance "$ETH_RPC" "$funding_address"; then
       print_warning "Funding 地址 ETH 不足，请补充 0.2 ETH"
       read -p "确认后继续..."
     fi
   fi
+  
   echo ""
   print_info "选择密钥来源："
   echo "1. 从现有 keystore.json 加载 (推荐)"
   echo "2. 手动输入 ETH 私钥和 BLS 私钥"
   read -p "请选择 (1-2): " key_choice
+  
   local new_eth_key new_bls_key new_address
   case $key_choice in
     1)
@@ -619,21 +747,25 @@ register_validator() {
       return 1
       ;;
   esac
+  
   echo ""
   print_info "检查验证者地址 ETH 余额..."
   if ! check_eth_balance "$ETH_RPC" "$new_address"; then
     print_warning "验证者地址 ETH 不足，请转 0.3 ETH 到 $new_address"
     read -p "确认后继续..."
   fi
+  
   echo ""
   print_info "检查 STAKE 余额和授权..."
   if ! check_stake_balance_and_approve "$ETH_RPC" "$FUNDING_PRIVATE_KEY" "$funding_address"; then
     print_error "授权失败，请修复后重试此选项。"
     return 1
   fi
+  
   echo ""
   print_info "执行注册验证者..."
   aztec add-l1-validator --l1-rpc-urls "$ETH_RPC" --network testnet --private-key "$FUNDING_PRIVATE_KEY" --attester "$new_address" --withdrawer "$new_address" --bls-secret-key "$new_bls_key" --rollup "$ROLLUP_CONTRACT"
+  
   print_success "注册成功！"
   echo "队列检查: $DASHTEC_URL/validator/$new_address"
   read -p "按任意键继续..."
@@ -644,7 +776,7 @@ main_menu() {
   while true; do
     clear
     echo "========================================"
-    echo " Aztec 节点安装 (简化版) - v2.1.2"
+    echo " Aztec 节点安装 (修复版) - v2.1.2"
     echo "========================================"
     echo "1. 安装/启动节点 (先安装节点)"
     echo "2. 查看日志和状态"
@@ -665,4 +797,8 @@ main_menu() {
   done
 }
 
+# 设置默认 keystore 路径
+DEFAULT_KEYSTORE="$HOME/.aztec/keystore/key1.json"
+
+# 启动主菜单
 main_menu
