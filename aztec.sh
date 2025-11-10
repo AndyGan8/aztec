@@ -12,6 +12,7 @@ KEY_DIR="/root/aztec-sequencer/keys"
 AZTEC_IMAGE="aztecprotocol/aztec:latest"
 ROLLUP_CONTRACT="0xebd99ff0ff6677205509ae73f93d0ca52ac85d67"
 STAKE_TOKEN="0x139d2a7a0881e16332d7D1F8DB383A4507E1Ea7A"
+STAKING_HANDLER="0xF739D03e98e23A7B65940848aBA8921fF3bAc4b2"
 DASHTEC_URL="https://dashtec.xyz"
 STAKE_AMOUNT=200000000000000000000  # 200 STK (18 decimals)
 DEFAULT_KEYSTORE="$HOME/.aztec/keystore/key1.json"
@@ -55,7 +56,7 @@ check_stk_allowance() {
       \"params\": [
         {
           \"to\": \"$STAKE_TOKEN\",
-          \"data\": \"0xdd62ed3e000000000000000000000000$(echo $funding_address | sed 's/0x//')00000000000000000000000000000000$(echo $ROLLUP_CONTRACT | sed 's/0x//')\"
+          \"data\": \"0xdd62ed3e000000000000000000000000$(echo $funding_address | sed 's/0x//')00000000000000000000000000000000$(echo $STAKING_HANDLER | sed 's/0x//')\"
         },
         \"latest\"
       ],
@@ -67,7 +68,7 @@ check_stk_allowance() {
 # ==================== 发送 STK Approve ====================
 send_stk_approve() {
     local rpc_url=$1 funding_private_key=$2
-    local approve_tx=$(cast send "$STAKE_TOKEN" "approve(address,uint256)" "$ROLLUP_CONTRACT" "$STAKE_AMOUNT" --private-key "$funding_private_key" --rpc-url "$rpc_url" --gas-limit 200000 2>&1)
+    local approve_tx=$(cast send "$STAKE_TOKEN" "approve(address,uint256)" "$STAKING_HANDLER" "$STAKE_AMOUNT" --private-key "$funding_private_key" --rpc-url "$rpc_url" --gas-limit 200000 2>&1)
     if echo "$approve_tx" | jq . >/dev/null 2>&1; then
         local status=$(echo "$approve_tx" | jq -r '.status')
         local tx_hash=$(echo "$approve_tx" | jq -r '.transactionHash')
@@ -265,10 +266,6 @@ register_validator_direct() {
     echo
     if [[ -z "$FUNDING_PRIVATE_KEY" || ! "$FUNDING_PRIVATE_KEY" =~ ^0x[a-fA-F0-9]{64}$ ]]; then print_error "私钥无效"; return 1; fi
     
-    read -sp "BLS 私钥 (需以 0x 开头): " BLS_SECRET_KEY
-    echo
-    if [[ -z "$BLS_SECRET_KEY" || ! "$BLS_SECRET_KEY" =~ ^0x[a-fA-F0-9]{64,128}$ ]]; then print_error "BLS 私钥无效 (长度需 64-128 hex)"; return 1; fi  # BLS 私钥通常 32 字节 (64 hex)
-    
     local funding_address=$(generate_address_from_private_key "$FUNDING_PRIVATE_KEY")
     print_info "Funding 地址: $funding_address"
     
@@ -289,23 +286,23 @@ register_validator_direct() {
     
     # 固定 attester/withdrawer (你的示例地址)
     local ATTESTER="0x188df4682a70262bdb316b02c56b31eb53e7c0cb"
-    local WITHDRAWER="0x188df4682a70262bdb316b02c56b31eb53e7c0cb"
+    local PROPOSER_EOA="0x188df4682a70262bdb316b02c56b31eb53e7c0cb"
     
     print_info "注册参数："
-    echo "  Attester/Withdrawer: $ATTESTER"
-    echo "  Rollup: $ROLLUP_CONTRACT"
+    echo "  Attester: $ATTESTER"
+    echo "  Proposer EOA: $PROPOSER_EOA"
+    echo "  Staking Handler: $STAKING_HANDLER"
+    echo "  L1 Chain ID: 11155111"
     read -p "确认执行？[Enter] 或 Ctrl+C 取消..."
     
-    # 执行你的命令
+    # 执行修正后的命令 (移除 --yes, --network, --rollup, --bls-secret-key, --withdrawer -> --proposer-eoa; 添加 --staking-asset-handler 和 --l1-chain-id)
     if aztec add-l1-validator \
         --l1-rpc-urls "$ETH_RPC" \
-        --network testnet \
         --private-key "$FUNDING_PRIVATE_KEY" \
         --attester "$ATTESTER" \
-        --withdrawer "$WITHDRAWER" \
-        --bls-secret-key "$BLS_SECRET_KEY" \
-        --rollup "$ROLLUP_CONTRACT" \
-        --yes; then  # --yes 自动确认
+        --proposer-eoa "$PROPOSER_EOA" \
+        --staking-asset-handler "$STAKING_HANDLER" \
+        --l1-chain-id 11155111; then
         
         print_success "注册成功！队列检查: $DASHTEC_URL/validator/$ATTESTER"
         echo "Tx 检查: https://sepolia.etherscan.io/address/$funding_address"
@@ -326,7 +323,7 @@ main_menu() {
         echo "3. 更新/重启"
         echo "4. 性能监控"
         echo "5. 退出"
-        echo "6. 注册验证者 (自动)"
+        echo "6. 注册验证者 (手动)"
         echo ""
         read -p "选择 (1-6): " choice
         case $choice in
