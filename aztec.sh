@@ -68,11 +68,16 @@ check_stk_allowance() {
 # ==================== 发送 STK Approve ====================
 send_stk_approve() {
     local rpc_url=$1 funding_private_key=$2
-    local approve_tx=$(cast send "$STAKE_TOKEN" "approve(address,uint256)" "$STAKING_HANDLER" "$STAKE_AMOUNT" --private-key "$funding_private_key" --rpc-url "$rpc_url" --gas-limit 200000 2>&1)
+    # 强制 JSON 输出
+    local approve_tx=$(cast send "$STAKE_TOKEN" "approve(address,uint256)" "$STAKING_HANDLER" "$STAKE_AMOUNT" --private-key "$funding_private_key" --rpc-url "$rpc_url" --gas-limit 200000 --json 2>&1)
+    
+    # 调试输出 (可选，生产时注释)
+    # echo "Debug: approve_tx = $approve_tx" >&2
+    
     if echo "$approve_tx" | jq . >/dev/null 2>&1; then
-        local status=$(echo "$approve_tx" | jq -r '.status')
-        local tx_hash=$(echo "$approve_tx" | jq -r '.transactionHash')
-        if [[ "$status" == "1" ]]; then
+        local status=$(echo "$approve_tx" | jq -r '.status // empty')
+        local tx_hash=$(echo "$approve_tx" | jq -r '.transactionHash // empty')
+        if [[ "$status" == "1" || "$status" == "0x1" ]]; then
             print_success "Approve 成功！Tx: $tx_hash"
             sleep 30
             return 0
@@ -81,8 +86,17 @@ send_stk_approve() {
             return 1
         fi
     else
-        print_error "Approve 发送失败: $approve_tx"
-        return 1
+        # Fallback: 从多行输出中提取 status 和 hash
+        local grep_status=$(echo "$approve_tx" | grep -i "status" | head -1 | sed 's/.*status[^0-9]*\([0-9x]*\).*/\1/' | tr -d ' ')
+        local grep_hash=$(echo "$approve_tx" | grep -i "transactionHash" | head -1 | sed 's/.*transactionHash[^0-9a-f]*\([0-9a-fx]*\).*/\1/')
+        if [[ "$grep_status" == "1" || "$grep_status" == "0x1" ]]; then
+            print_success "Approve 成功！Tx: ${grep_hash:-unknown}"
+            sleep 30
+            return 0
+        else
+            print_error "Approve 发送失败: $approve_tx"
+            return 1
+        fi
     fi
 }
 
