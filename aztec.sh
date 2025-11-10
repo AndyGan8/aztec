@@ -13,7 +13,7 @@ AZTEC_IMAGE="aztecprotocol/aztec:latest"
 ROLLUP_CONTRACT="0xebd99ff0ff6677205509ae73f93d0ca52ac85d67"
 STAKE_TOKEN="0x139d2a7a0881e16332d7D1F8DB383A4507E1Ea7A"
 DASHTEC_URL="https://dashtec.xyz"
-STAKE_AMOUNT=200000000000000000000000
+STAKE_AMOUNT=200000000000000000000000  # 200 STK (18 decimals)
 DEFAULT_KEYSTORE="$HOME/.aztec/keystore/key1.json"
 
 # ==================== 打印函数 ====================
@@ -62,11 +62,59 @@ generate_address_from_private_key() {
     local private_key=$1
     private_key=$(echo "$private_key" | tr -d ' ' | sed 's/^0x//')
     if [[ ${#private_key} -ne 64 ]]; then
-        print_error "私钥长度错误 (需64 hex): ${#private_key}"
+        print_error "私钥长度错误 (需64 hex): ${##private_key}"
         return 1
     fi
     private_key="0x$private_key"
     cast wallet address --private-key "$private_key" 2>/dev/null || echo ""
+}
+
+# ==================== 检查 STK 授权 ====================
+check_stk_allowance() {
+    local rpc_url=$1
+    local funding_address=$2
+    local allowance=$(curl -s -X POST -H "Content-Type: application/json" --data "{
+      \"jsonrpc\": \"2.0\",
+      \"method\": \"eth_call\",
+      \"params\": [
+        {
+          \"to\": \"$STAKE_TOKEN\",
+          \"data\": \"0xdd62ed3e000000000000000000000000$(echo $funding_address | sed 's/0x//')00000000000000000000000000000000$(echo $ROLLUP_CONTRACT | sed 's/0x//')\"
+        },
+        \"latest\"
+      ],
+      \"id\": 1
+    }" "$rpc_url" | jq -r '.result')
+
+    if [[ "$allowance" == "null" || "$allowance" == "" ]]; then
+        echo "0"
+    else
+        echo "$allowance"
+    fi
+}
+
+# ==================== 发送 STK Approve ====================
+send_stk_approve() {
+    local rpc_url=$1
+    local funding_private_key=$2
+    local approve_tx=$(cast send "$STAKE_TOKEN" \
+        "approve(address,uint256)" \
+        "$ROLLUP_CONTRACT" \
+        "$STAKE_AMOUNT" \
+        --private-key "$funding_private_key" \
+        --rpc-url "$rpc_url" \
+        --gas-limit 200000 2>&1)
+
+    if [[ $approve_tx == *"tx hash"* ]]; then
+        local tx_hash=$(echo "$approve_tx" | grep -o '0x[a-fA-F0-9]\{64\}')
+        print_success "Approve 交易发送成功！Tx Hash: $tx_hash"
+        echo "等待确认..."
+        sleep 30  # 等待 30 秒确认
+        return 0
+    else
+        print_error "Approve 交易失败: $approve_tx"
+        return 1
+    fi
 }
 
 # ==================== 清理现有容器 ====================
@@ -386,10 +434,10 @@ monitor_performance() {
     read -p "按任意键继续..."
 }
 
-# ==================== 直接注册验证者函数（跳过余额检查） ====================
+# ==================== 直接注册验证者函数（添加授权步骤） ====================
 register_validator_direct() {
     clear
-    print_info "Aztec 验证者注册 (直接注册版)"
+    print_info "Aztec 验证者注册 (带授权版)"
     echo "=========================================="
     
     if ! check_environment; then
@@ -399,7 +447,7 @@ register_validator_direct() {
     fi
     
     echo ""
-    echo "🚀 直接注册验证者 - 跳过余额检查"
+    echo "🚀 注册验证者 - 自动检查/执行 STK 授权"
     echo "⚠️  请确保你有："
     echo "   - 200k STAKE 在 Funding 地址"
     echo "   - 足够的 ETH 支付 gas 费用"
@@ -426,15 +474,24 @@ register_validator_direct() {
     funding_address=$(generate_address_from_private_key "$FUNDING_PRIVATE_KEY")
     print_info "Funding 地址: $funding_address"
     
-    # 直接跳过余额检查
     echo ""
-    print_warning "⚠️  跳过余额检查，直接进行注册"
-    print_info "请确认以下地址有足够余额："
-    echo "  - Funding 地址: $funding_address"
-    echo "  - 需要: 200k STAKE + 0.2 ETH (用于 gas)"
-    echo ""
+    print_info "检查 STK 授权额度..."
+    local current_allowance_hex=$(check_stk_allowance "$ETH_RPC" "$funding_address")
+    local current_allowance_dec=$(printf "%d" "0x$current_allowance_hex" 2>/dev/null || echo "0")
+    print_info "当前授权额度: ${current_allowance_dec} wei (${current_allowance_dec} / 10^18 STK)"
     
-    read -p "确认余额充足后按 [Enter] 继续..."
+    if [ "$current_allowance_dec" -ge "$STAKE_AMOUNT" ]; then
+        print_success "授权额度足够 ( >= 200 STK)，跳过 approve。"
+    else
+        print_warning "授权不足，执行 approve..."
+        if send_stk_approve "$ETH_RPC" "$FUNDING_PRIVATE_KEY"; then
+            print_success "Approve 完成！"
+        else
+            print_error "Approve 失败，请手动执行后重试。"
+            read -p "按任意键返回菜单..."
+            return 1
+        fi
+    fi
     
     # 选择验证者密钥
     echo ""
@@ -595,7 +652,7 @@ main_menu() {
         echo "3. 更新并重启节点"
         echo "4. 性能监控"
         echo "5. 退出"
-        echo "6. 直接注册验证者 (跳过余额检查)"
+        echo "6. 直接注册验证者 (带授权版)"
         echo ""
         read -p "请选择 (1-6): " choice
         
