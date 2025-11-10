@@ -252,87 +252,65 @@ monitor_performance() {
     read -p "按任意键..."
 }
 
-# ==================== 注册验证者 (自动命令) ====================
+# ==================== 注册验证者 (手动版) ====================
 register_validator_direct() {
     clear
-    print_info "验证者注册 (自动版)"
+    print_info "验证者注册 (手动版)"
     if ! check_environment; then print_error "环境失败"; read -p "按任意键..."; return 1; fi
     
     echo "信息："
     read -p "L1 RPC (默认 http://94.72.112.218:8545): " ETH_RPC
     ETH_RPC=${ETH_RPC:-"http://94.72.112.218:8545"}
-    read -sp "Funding 私钥: " FUNDING_PRIVATE_KEY
+    read -sp "Funding 私钥 (需以 0x 开头): " FUNDING_PRIVATE_KEY
     echo
     if [[ -z "$FUNDING_PRIVATE_KEY" || ! "$FUNDING_PRIVATE_KEY" =~ ^0x[a-fA-F0-9]{64}$ ]]; then print_error "私钥无效"; return 1; fi
     
-    local funding_address=$(generate_address_from_private_key "$FUNDING_PRIVATE_KEY")
-    print_info "Funding: $funding_address"
+    read -sp "BLS 私钥 (需以 0x 开头): " BLS_SECRET_KEY
+    echo
+    if [[ -z "$BLS_SECRET_KEY" || ! "$BLS_SECRET_KEY" =~ ^0x[a-fA-F0-9]{64,128}$ ]]; then print_error "BLS 私钥无效 (长度需 64-128 hex)"; return 1; fi  # BLS 私钥通常 32 字节 (64 hex)
     
-    # 检查授权
+    local funding_address=$(generate_address_from_private_key "$FUNDING_PRIVATE_KEY")
+    print_info "Funding 地址: $funding_address"
+    
+    # 可选：检查并执行 STK 授权 (如果不需要，注释掉)
     print_info "检查授权..."
     local allowance_hex=$(check_stk_allowance "$ETH_RPC" "$funding_address")
-    local allowance_dec=$(echo "ibase=16; $allowance_hex" | bc 2>/dev/null || echo "0")
+    local allowance_dec=$(echo "ibase=16; ${allowance_hex#0x}" | bc 2>/dev/null || echo "0")  # 修正 bc 输入 (去掉 0x)
     local required_dec=200000000000000000000
-    print_info "当前授权: $allowance_dec wei ($((allowance_dec / 10**18)) STK)"
+    print_info "当前授权: $((allowance_dec / 10**18)) STK"
     
     if [ "$allowance_dec" -lt "$required_dec" ]; then
         print_warning "授权不足，执行 approve..."
         if ! send_stk_approve "$ETH_RPC" "$FUNDING_PRIVATE_KEY"; then
             print_error "Approve 失败，手动重试"
-            read -p "按任意键..."
-            return 1
+            read -p "按任意键..."; return 1
         fi
     fi
     
-    # 密钥选择
-    echo "密钥：1. 节点密钥 2. 新生成 3. 加载 keystore"
-    read -p "选择 (1-3): " key_choice
+    # 固定 attester/withdrawer (你的示例地址)
+    local ATTESTER="0x188df4682a70262bdb316b02c56b31eb53e7c0cb"
+    local WITHDRAWER="0x188df4682a70262bdb316b02c56b31eb53e7c0cb"
     
-    local validator_address validator_bls_key
-    case $key_choice in
-        1)
-            if [[ -f "$AZTEC_DIR/.env" ]]; then
-                validator_address=$(grep "COINBASE" "$AZTEC_DIR/.env" | cut -d'=' -f2)
-                read -sp "BLS 私钥: " validator_bls_key
-                if [[ -z "$validator_bls_key" ]]; then print_error "BLS 无效"; return 1; fi
-            else
-                print_error "节点未配置"
-                return 1
-            fi
-            ;;
-        2|3)
-            local temp_dir="/tmp/aztec_keys"
-            rm -rf "$temp_dir" 2>/dev/null || true
-            mkdir -p "$temp_dir"
-            aztec validator-keys new --fee-recipient 0x0000000000000000000000000000000000000000 --directory "$temp_dir" || { print_error "生成失败"; return 1; }
-            local temp_keystore="$temp_dir/key1.json"
-            local temp_eth_key=$(jq -r '.validators[0].attester.eth' "$temp_keystore")
-            validator_address=$(generate_address_from_private_key "$temp_eth_key")
-            validator_bls_key=$(jq -r '.validators[0].attester.bls' "$temp_keystore")
-            print_success "新地址: $validator_address (保存: ETH $temp_eth_key, BLS $validator_bls_key)"
-            read -p "确认 [Enter]..."
-            rm -rf "$temp_dir"
-            ;;
-        *) print_error "无效"; return 1 ;;
-    esac
+    print_info "注册参数："
+    echo "  Attester/Withdrawer: $ATTESTER"
+    echo "  Rollup: $ROLLUP_CONTRACT"
+    read -p "确认执行？[Enter] 或 Ctrl+C 取消..."
     
-    # 执行注册命令
-    print_info "注册: $validator_address"
-    read -p "确认 [Enter]..."
-    
+    # 执行你的命令
     if aztec add-l1-validator \
         --l1-rpc-urls "$ETH_RPC" \
         --network testnet \
         --private-key "$FUNDING_PRIVATE_KEY" \
-        --attester "$validator_address" \
-        --withdrawer "$validator_address" \
-        --bls-secret-key "$validator_bls_key" \
-        --rollup "$ROLLUP_CONTRACT" --yes; then  # --yes 跳过确认
+        --attester "$ATTESTER" \
+        --withdrawer "$WITHDRAWER" \
+        --bls-secret-key "$BLS_SECRET_KEY" \
+        --rollup "$ROLLUP_CONTRACT" \
+        --yes; then  # --yes 自动确认
         
-        print_success "注册成功！队列: $DASHTEC_URL/validator/$validator_address"
+        print_success "注册成功！队列检查: $DASHTEC_URL/validator/$ATTESTER"
         echo "Tx 检查: https://sepolia.etherscan.io/address/$funding_address"
     else
-        print_error "注册失败，重试或检查日志"
+        print_error "注册失败，重试或检查 aztec 命令输出"
     fi
     read -p "按任意键..."
 }
