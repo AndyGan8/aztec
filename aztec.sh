@@ -397,246 +397,140 @@ load_existing_keystore() {
     return 0
 }
 
-# ==================== 可靠的余额检查 ====================
-reliable_stake_balance_check() {
-    local eth_rpc=$1
-    local address=$2
+# ==================== 优化的注册验证者函数（基于官方脚本） ====================
+register_validator_optimized() {
+    clear
+    print_info "Aztec 验证者注册 (优化版) - v2.1.2 兼容"
+    echo "=========================================="
     
-    print_info "使用可靠 RPC 检查 STAKE 余额..."
-    
-    # 尝试多个可靠的公共 RPC
-    local reliable_rpcs=(
-        "https://rpc.sepolia.org"
-        "https://ethereum-sepolia-rpc.publicnode.com"
-        "https://sepolia.drpc.org"
-    )
-    
-    local balance_hex="0x0"
-    local balance=0
-    local formatted_balance=0
-    
-    for rpc in "${reliable_rpcs[@]}"; do
-        print_info "尝试 RPC: $(echo "$rpc" | sed 's|https://||')"
-        balance_hex=$(cast call "$STAKE_TOKEN" "balanceOf(address)(uint256)" "$address" --rpc-url "$rpc" 2>/dev/null || echo "0x0")
-        
-        if [[ "$balance_hex" != "0x0" && "$balance_hex" != "0x" ]]; then
-            balance=$(printf "%d" "$balance_hex" 2>/dev/null || echo "0")
-            formatted_balance=$(echo "scale=0; $balance / 1000000000000000000" | bc 2>/dev/null || echo "0")
-            
-            if [[ "$balance" -gt 0 ]]; then
-                print_success "从 $rpc 获取到余额: $formatted_balance STAKE"
-                
-                # 验证余额是否合理
-                if [[ "$balance" -ge "$STAKE_AMOUNT" ]]; then
-                    print_success "STAKE 余额充足: $formatted_balance STAKE"
-                    return 0
-                else
-                    print_warning "STAKE 余额不足: $formatted_balance STAKE (需要 200k)"
-                    return 1
-                fi
-            fi
-        fi
-        sleep 1
-    done
-    
-    # 如果所有 RPC 都失败，使用原始 RPC 作为后备
-    print_warning "所有可靠 RPC 失败，使用原始 RPC 作为后备..."
-    balance_hex=$(cast call "$STAKE_TOKEN" "balanceOf(address)(uint256)" "$address" --rpc-url "$eth_rpc" 2>/dev/null || echo "0x0")
-    balance=$(printf "%d" "$balance_hex" 2>/dev/null || echo "0")
-    formatted_balance=$(echo "scale=0; $balance / 1000000000000000000" | bc 2>/dev/null || echo "0")
-    
-    print_info "后备 RPC 余额: $formatted_balance STAKE"
-    
-    if [[ "$balance" -ge "$STAKE_AMOUNT" ]]; then
-        print_success "STAKE 余额充足: $formatted_balance STAKE"
-        return 0
-    else
-        print_error "STAKE 余额不足: $formatted_balance STAKE (需要 200k)"
+    if ! check_environment; then
         return 1
     fi
-}
-
-# ==================== 改进的交易哈希提取函数 ====================
-extract_tx_hash() {
-    local output="$1"
-    local tx_hash=""
-    
-    # 方法1: 从标准 Foundry 输出格式提取
-    tx_hash=$(echo "$output" | grep -oE 'transactionHash:[[:space:]]*(0x[a-fA-F0-9]{64})' | cut -d' ' -f2)
-    
-    # 方法2: 从常见格式提取
-    if [[ -z "$tx_hash" ]]; then
-        tx_hash=$(echo "$output" | grep -oE '0x[a-fA-F0-9]{64}' | head -1)
-    fi
-    
-    # 方法3: 从 JSON 格式提取
-    if [[ -z "$tx_hash" ]]; then
-        tx_hash=$(echo "$output" | jq -r '.transactionHash' 2>/dev/null || echo "")
-    fi
-    
-    # 验证哈希格式
-    if [[ -n "$tx_hash" && "${#tx_hash}" -eq 66 && "$tx_hash" =~ ^0x[a-fA-F0-9]{64}$ ]]; then
-        echo "$tx_hash"
-        return 0
-    else
-        return 1
-    fi
-}
-
-# ==================== 检查交易确认状态 ====================
-wait_for_transaction() {
-    local tx_hash="$1"
-    local rpc_url="$2"
-    local max_attempts=30
-    
-    print_info "等待交易确认: $tx_hash"
-    
-    for ((i=1; i<=max_attempts; i++)); do
-        local receipt
-        receipt=$(cast receipt "$tx_hash" --rpc-url "$rpc_url" 2>/dev/null || echo "")
-        
-        if [[ -n "$receipt" && "$receipt" != "null" ]]; then
-            # 检查交易状态
-            local status
-            status=$(echo "$receipt" | grep -oE 'status:[[:space:]]*[0-9]+' | cut -d' ' -f2 || echo "")
-            
-            if [[ "$status" == "1" ]]; then
-                print_success "交易已确认并成功！"
-                return 0
-            elif [[ "$status" == "0" ]]; then
-                print_error "交易失败！"
-                return 1
-            else
-                print_success "交易已确认（状态未知）"
-                return 0
-            fi
-        fi
-        
-        if [[ $i -eq $max_attempts ]]; then
-            print_warning "交易确认超时，但继续流程..."
-            return 0
-        fi
-        
-        echo -n "."
-        sleep 3
-    done
     
     echo ""
-    return 0
-}
+    echo "请提供原有验证者信息："
+    read -sp "   输入原有 Funding 私钥 (不显示): " OLD_PRIVATE_KEY && echo
+    read -p "   输入 Sepolia RPC URL (推荐 https://rpc.sepolia.org): " ETH_RPC
+    echo "开始处理..." && echo ""
 
-# ==================== 修复的 STAKE 授权函数 ====================
-check_stake_balance_and_approve() {
-    local eth_rpc=$1
-    local funding_private_key=$2
-    local funding_address=$3
+    # 验证私钥格式
+    OLD_PRIVATE_KEY=$(echo "$OLD_PRIVATE_KEY" | tr -d ' ')
+    if [[ ! "$OLD_PRIVATE_KEY" =~ ^0x[a-fA-F0-9]{64}$ ]]; then
+        print_error "私钥格式错误 (需 0x + 64 hex)"
+        return 1
+    fi
+
+    # 生成 funding 地址
+    local funding_address
+    funding_address=$(generate_address_from_private_key "$OLD_PRIVATE_KEY")
+    if [[ -z "$funding_address" ]]; then
+        print_error "Funding 地址生成失败"
+        return 1
+    fi
+    print_info "Funding 地址: $funding_address"
+
+    # 检查 funding 地址余额
+    print_info "检查 Funding 地址余额..."
+    if ! check_eth_balance "$ETH_RPC" "$funding_address"; then
+        print_warning "Funding 地址 ETH 不足，请补充 0.2 ETH"
+        read -p "确认后继续..."
+    fi
+
+    # 清理旧密钥并生成新密钥
+    print_info "准备生成新密钥..."
+    rm -rf ~/.aztec/keystore 2>/dev/null
+    echo "请准备好记录新的私钥和地址！"
+    read -p "   按 [Enter] 生成新密钥..."
     
-    print_info "检查 STAKE 余额和授权..."
+    aztec validator-keys new --fee-recipient 0x0000000000000000000000000000000000000000000000000000000000000000
+    echo ""
+
+    # 读取新生成的密钥
+    KEYSTORE_FILE=~/.aztec/keystore/key1.json
+    NEW_ETH_PRIVATE_KEY=$(jq -r '.validators[0].attester.eth' "$KEYSTORE_FILE")
+    NEW_BLS_PRIVATE_KEY=$(jq -r '.validators[0].attester.bls' "$KEYSTORE_FILE")
+    NEW_PUBLIC_ADDRESS=$(cast wallet address --private-key "$NEW_ETH_PRIVATE_KEY")
+
+    echo "✅ 新密钥生成成功！请安全保存以下信息："
+    echo "   - ETH 私钥: $NEW_ETH_PRIVATE_KEY"
+    echo "   - BLS 私钥: $NEW_BLS_PRIVATE_KEY"
+    echo "   - 地址: $NEW_PUBLIC_ADDRESS"
+    echo ""
+
+    # 检查新地址余额
+    print_info "检查新地址余额..."
+    BALANCE=$(cast balance "$NEW_PUBLIC_ADDRESS" --rpc-url "$ETH_RPC")
+    BALANCE_ETH=$(echo "scale=4; $BALANCE / 1000000000000000000" | bc)
+
+    if (( $(echo "$BALANCE_ETH < 0.3" | bc -l) )); then
+        echo "⚠️  余额不足: $BALANCE_ETH ETH"
+        echo "请转账 0.3-0.5 ETH 到地址:"
+        echo "   $NEW_PUBLIC_ADDRESS"
+        echo "转账后继续..."
+        read -p "   确认已转账后按 [Enter] 继续..." && echo ""
+    else
+        echo "✅ 余额充足: $BALANCE_ETH ETH"
+    fi
+
+    # 检查 STAKE 余额
+    print_info "检查 STAKE 余额..."
+    local stake_balance_hex
+    stake_balance_hex=$(cast call "$STAKE_TOKEN" "balanceOf(address)(uint256)" "$funding_address" --rpc-url "$ETH_RPC" 2>/dev/null || echo "0x0")
+    local stake_balance=$(printf "%d" "$stake_balance_hex" 2>/dev/null || echo "0")
+    local formatted_stake=$(echo "scale=0; $stake_balance / 1000000000000000000" | bc 2>/dev/null || echo "0")
     
-    # 使用可靠的余额检查
-    if ! reliable_stake_balance_check "$eth_rpc" "$funding_address"; then
-        print_error "STAKE 余额不足！需要 200k STAKE"
+    if [[ "$stake_balance" -lt "$STAKE_AMOUNT" ]]; then
+        print_error "STAKE 余额不足！需要 200k STAKE，当前 $formatted_stake STAKE"
         print_warning "请从 Faucet 获取: https://testnet.aztec.network/faucet"
-        print_warning "升级提醒: 需要 ZKPassport 证明 (下载 App 并连接 Discord)"
-        read -p "确认补充后按 [Enter] 继续 (或输入 'skip' 手动跳过)..."
-        if [[ "$REPLY" == "skip" ]]; then
-            print_warning "跳过余额检查，继续授权..."
-        else
-            # 重新检查
-            if ! reliable_stake_balance_check "$eth_rpc" "$funding_address"; then
-                print_error "补充后仍不足，退出"
-                return 1
-            fi
-        fi
+        read -p "确认补充后按 [Enter] 继续..."
+        return 1
+    else
+        print_success "STAKE 余额充足: $formatted_stake STAKE"
+    fi
+
+    # STAKE 授权
+    print_info "执行 STAKE 授权..."
+    if cast send "$STAKE_TOKEN" \
+        "approve(address,uint256)" \
+        "$ROLLUP_CONTRACT" \
+        "200000000000000000000000" \
+        --private-key "$OLD_PRIVATE_KEY" \
+        --rpc-url "$ETH_RPC" \
+        --gas-price 2gwei; then
+        print_success "✅ 授权成功"
+    else
+        print_error "授权失败"
+        return 1
+    fi
+
+    # 注册验证者
+    echo ""
+    print_info "注册验证者到测试网..."
+    if aztec add-l1-validator \
+        --l1-rpc-urls "$ETH_RPC" \
+        --network testnet \
+        --private-key "$OLD_PRIVATE_KEY" \
+        --attester "$NEW_PUBLIC_ADDRESS" \
+        --withdrawer "$NEW_PUBLIC_ADDRESS" \
+        --bls-secret-key "$NEW_BLS_PRIVATE_KEY" \
+        --rollup "$ROLLUP_CONTRACT"; then
+        
+        echo ""
+        print_success "🎉 注册完成！"
+        echo "✅ 验证者已成功注册到测试网"
+        echo "📝 请使用新密钥更新你的节点配置："
+        echo "   - ETH 私钥: $NEW_ETH_PRIVATE_KEY"
+        echo "   - 地址: $NEW_PUBLIC_ADDRESS"
+        echo ""
+        echo "队列检查: $DASHTEC_URL/validator/$NEW_PUBLIC_ADDRESS"
+        echo "重新启动节点以使用新密钥运行"
+    else
+        print_error "注册失败"
+        return 1
     fi
     
-    print_info "检查 STAKE 授权..."
-    local allowance_hex
-    allowance_hex=$(cast call "$STAKE_TOKEN" "allowance(address,address)(uint256)" "$funding_address" "$ROLLUP_CONTRACT" --rpc-url "$eth_rpc" 2>/dev/null || echo "0x0")
-    local allowance=$(printf "%d" "$allowance_hex" 2>/dev/null || echo "0")
-    local formatted_allowance=$(echo "scale=0; $allowance / 1000000000000000000" | bc 2>/dev/null || echo "0")
-    
-    if [[ "$allowance" -ge "$STAKE_AMOUNT" ]]; then
-        print_success "STAKE 已授权 (额度: $formatted_allowance STAKE)"
-        return 0
-    fi
-    
-    print_warning "执行 STAKE 授权 (额度: 200k STAKE)..."
-    
-    for attempt in 1 2 3; do
-        print_info "授权尝试 $attempt/3..."
-        
-        # 执行授权交易
-        local tx_output
-        tx_output=$(cast send "$STAKE_TOKEN" "approve(address,uint256)" \
-            "$ROLLUP_CONTRACT" "200000000000000000000000" \
-            --private-key "$funding_private_key" --rpc-url "$eth_rpc" --gas-price 2gwei 2>&1)
-        
-        # 提取交易哈希
-        local tx_hash
-        tx_hash=$(extract_tx_hash "$tx_output")
-        
-        if [[ -n "$tx_hash" ]]; then
-            print_success "交易发送成功！TX Hash: $tx_hash"
-            print_info "查看交易详情: https://sepolia.etherscan.io/tx/$tx_hash"
-            
-            # 等待交易确认
-            if wait_for_transaction "$tx_hash" "$eth_rpc"; then
-                # 检查授权结果
-                sleep 5  # 额外等待确保状态更新
-                allowance_hex=$(cast call "$STAKE_TOKEN" "allowance(address,address)(uint256)" "$funding_address" "$ROLLUP_CONTRACT" --rpc-url "$eth_rpc" 2>/dev/null || echo "0x0")
-                allowance=$(printf "%d" "$allowance_hex" 2>/dev/null || echo "0")
-                formatted_allowance=$(echo "scale=0; $allowance / 1000000000000000000" | bc 2>/dev/null || echo "0")
-                
-                if [[ "$allowance" -ge "$STAKE_AMOUNT" ]]; then
-                    print_success "授权成功！当前额度: $formatted_allowance STAKE"
-                    return 0
-                else
-                    print_warning "交易已确认但授权额度不足，当前: $formatted_allowance STAKE"
-                fi
-            else
-                print_warning "交易确认失败"
-            fi
-        else
-            print_warning "无法提取交易哈希，输出详情:"
-            echo "$tx_output"
-            
-            # 检查是否是余额不足
-            if echo "$tx_output" | grep -qi "insufficient funds"; then
-                print_error "ETH 余额不足支付 gas 费用！"
-                return 1
-            fi
-        fi
-        
-        if [[ $attempt -lt 3 ]]; then
-            print_warning "授权失败，10秒后重试..."
-            sleep 10
-        fi
-    done
-    
-    print_error "授权失败 3 次！"
-    echo ""
-    print_info "手动授权指南:"
-    echo "1. 检查私钥是否正确"
-    echo "2. 确保有足够的 ETH 支付 gas (至少 0.2 ETH)"
-    echo "3. 手动执行以下命令:"
-    echo "   cast send $STAKE_TOKEN \\"
-    echo "     \"approve(address,uint256)\" \\"
-    echo "     $ROLLUP_CONTRACT \\"
-    echo "     \"200000000000000000000000\" \\"
-    echo "     --private-key YOUR_PRIVATE_KEY \\"
-    echo "     --rpc-url $eth_rpc \\"
-    echo "     --gas-price 2gwei"
-    echo ""
-    echo "4. 然后检查授权:"
-    echo "   cast call $STAKE_TOKEN \\"
-    echo "     \"allowance(address,address)(uint256)\" \\"
-    echo "     $funding_address \\"
-    echo "     $ROLLUP_CONTRACT \\"
-    echo "     --rpc-url $eth_rpc"
-    
-    read -p "按 [Enter] 返回菜单手动处理..."
-    return 1
+    read -p "按任意键继续..."
+    return 0
 }
 
 # ==================== 检查 ETH 余额 ====================
@@ -826,95 +720,6 @@ EOF
     read -p "按任意键继续..."
 }
 
-# ==================== 单独注册验证者函数 ====================
-register_validator() {
-    clear
-    print_info "单独注册验证者 - v2.1.2 兼容"
-    echo "=========================================="
-    
-    if ! check_environment; then
-        return 1
-    fi
-    
-    echo ""
-    echo "请输入注册信息："
-    read -p "L1 执行 RPC URL (推荐: https://rpc.sepolia.org): " ETH_RPC
-    echo
-    read -p "Funding 私钥 (必须有 200k STAKE 和 0.2 ETH): " FUNDING_PRIVATE_KEY
-    echo ""
-    
-    if [[ -n "$FUNDING_PRIVATE_KEY" && ! "$FUNDING_PRIVATE_KEY" =~ ^0x[a-fA-F0-9]{64}$ ]]; then
-        print_error "私钥格式错误 (需 0x + 64 hex)"
-        return 1
-    fi
-    
-    local funding_address
-    if [[ -n "$FUNDING_PRIVATE_KEY" ]]; then
-        funding_address=$(generate_address_from_private_key "$FUNDING_PRIVATE_KEY")
-        if [[ -z "$funding_address" ]]; then return 1; fi
-        print_info "Funding 地址: $funding_address"
-        
-        if ! check_eth_balance "$ETH_RPC" "$funding_address"; then
-            print_warning "Funding 地址 ETH 不足，请补充 0.2 ETH"
-            read -p "确认后继续..."
-        fi
-    fi
-    
-    echo ""
-    print_info "选择密钥来源："
-    echo "1. 从现有 keystore.json 加载 (推荐)"
-    echo "2. 手动输入 ETH 私钥和 BLS 私钥"
-    read -p "请选择 (1-2): " key_choice
-    
-    local new_eth_key new_bls_key new_address
-    case $key_choice in
-        1)
-            echo "输入 keystore.json 路径 (默认 $DEFAULT_KEYSTORE): "
-            read -p "路径: " keystore_path
-            keystore_path=${keystore_path:-$DEFAULT_KEYSTORE}
-            if ! load_existing_keystore "$keystore_path"; then return 1; fi
-            new_eth_key="$LOADED_ETH_KEY"
-            new_bls_key="$LOADED_BLS_KEY"
-            new_address="$LOADED_ADDRESS"
-            ;;
-        2)
-            read -p "ETH 私钥 (0x + 64 hex): " new_eth_key
-            read -p "BLS 私钥: " new_bls_key
-            new_address=$(generate_address_from_private_key "$new_eth_key")
-            if [[ -z "$new_address" ]]; then return 1; fi
-            print_success "地址: $new_address"
-            print_warning "确认保存密钥！"
-            read -p "按 Enter 继续..."
-            ;;
-        *)
-            print_error "无效选择"
-            return 1
-            ;;
-    esac
-    
-    echo ""
-    print_info "检查验证者地址 ETH 余额..."
-    if ! check_eth_balance "$ETH_RPC" "$new_address"; then
-        print_warning "验证者地址 ETH 不足，请转 0.3 ETH 到 $new_address"
-        read -p "确认后继续..."
-    fi
-    
-    echo ""
-    print_info "检查 STAKE 余额和授权..."
-    if ! check_stake_balance_and_approve "$ETH_RPC" "$FUNDING_PRIVATE_KEY" "$funding_address"; then
-        print_error "授权失败，请修复后重试此选项。"
-        return 1
-    fi
-    
-    echo ""
-    print_info "执行注册验证者..."
-    aztec add-l1-validator --l1-rpc-urls "$ETH_RPC" --network testnet --private-key "$FUNDING_PRIVATE_KEY" --attester "$new_address" --withdrawer "$new_address" --bls-secret-key "$new_bls_key" --rollup "$ROLLUP_CONTRACT"
-    
-    print_success "注册成功！"
-    echo "队列检查: $DASHTEC_URL/validator/$new_address"
-    read -p "按任意键继续..."
-}
-
 # ==================== 查看日志和状态 ====================
 view_logs_and_status() {
     if docker ps | grep -q aztec-sequencer; then
@@ -1030,6 +835,7 @@ main_menu() {
         echo "4. 性能监控"
         echo "5. 退出"
         echo "6. 注册验证者 (单独选项)"
+        echo "7. 快速注册验证者 (优化版)"
         read -p "选择: " choice
         case $choice in
             1) install_and_start_node ;;
@@ -1038,6 +844,7 @@ main_menu() {
             4) monitor_performance ;;
             5) exit 0 ;;
             6) register_validator ;;
+            7) register_validator_optimized ;;
             *) echo "无效"; read -p "继续...";;
         esac
     done
