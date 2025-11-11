@@ -11,6 +11,7 @@ set -euo pipefail
 # - 新增：Approve 设置为无限授权（uint256 max），避免反复 approve（v3.7.2 热补丁）
 # - 优化：选项6 先强制无限授权，再检查/注册（v3.7.3 热补丁）
 # - 新增：自动安装缺失依赖（Foundry/Docker/jq/bc 等，Ubuntu/Debian）（v3.7.4 热补丁）
+# - 修复：PS1 unbound 错误，subshell 运行 foundryup（v3.7.5 热补丁）
 # ==================================================
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -18,7 +19,7 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-SCRIPT_VERSION="v3.7.4 (2025-11-11, 兼容2.1.2, 自动安装依赖 + 先无限授权)"
+SCRIPT_VERSION="v3.7.5 (2025-11-11, 兼容2.1.2, 自动安装依赖 + 先无限授权 + PS1 修复)"
 
 # ------------------ 可配置项 ------------------
 AZTEC_DIR="/root/aztec-sequencer"
@@ -78,15 +79,17 @@ install_missing_deps() {
     if [[ " ${missing[*]} " =~ " cast " ]]; then
         print_info "安装 Foundry（包括 cast）..."
         curl -L https://foundry.paradigm.xyz | bash || print_error "Foundry 下载失败"
-        source ~/.bashrc
-        foundryup || print_error "foundryup 失败"
+        # 临时设置 PS1 避免 unbound 错误
+        export PS1="\u@\h:\w\$ "
+        source ~/.bashrc || true  # 忽略错误
+        # 在 subshell 中运行 foundryup，避免影响主脚本
+        (foundryup) || print_error "foundryup 失败"
         print_success "Foundry 安装完成（cast 已可用）"
     fi
 
     # Aztec CLI（需 Node.js，先检查/安装 Node）
     if [[ " ${missing[*]} " =~ " aztec " ]]; then
-        print_warning "aztec CLI 需手动安装（npm global）。请运行: npm install -g @aztec/cli"
-        print_info "先安装 Node.js..."
+        print_info "安装 Node.js 和 aztec CLI..."
         curl -fsSL https://deb.nodesource.com/setup_20.x | bash - || print_error "NodeSource setup 失败"
         apt install -y nodejs || print_error "Node.js 安装失败"
         npm install -g @aztec/cli || print_error "aztec CLI 安装失败"
