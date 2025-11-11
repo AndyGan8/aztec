@@ -7,6 +7,8 @@ set -euo pipefail
 # - 全局配置输入移到选项1（安装节点）和选项6（注册）开始时（如果未设），主菜单不强制
 # - 私钥输入不隐藏（read -p）
 # - 其他兼容2.1.2，手动注册模板
+# - 修复：STK 授权检查使用 bc 处理 uint256 大整数，避免 bash 溢出（v3.7.1 热补丁）
+# - 新增：Approve 设置为无限授权（uint256 max），避免反复 approve（v3.7.2 热补丁）
 # ==================================================
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -14,7 +16,7 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-SCRIPT_VERSION="v3.7 (2025-11-11, 兼容2.1.2)"
+SCRIPT_VERSION="v3.7.2 (2025-11-11, 兼容2.1.2, 修复 uint256 溢出 + 无限授权)"
 
 # ------------------ 可配置项 ------------------
 AZTEC_DIR="/root/aztec-sequencer"
@@ -24,7 +26,8 @@ AZTEC_IMAGE="aztecprotocol/aztec:latest"
 
 ROLLUP_CONTRACT="0xebd99ff0ff6677205509ae73f93d0ca52ac85d67"
 STAKE_TOKEN="0x139d2a7a0881e16332d7D1F8DB383A4507E1Ea7A"
-STAKE_AMOUNT=200000000000000000000  # 200k STK (18 decimals)
+STAKE_AMOUNT="200000000000000000000"  # 200k STK (18 decimals)，用于比较（字符串形式用于 bc）
+APPROVE_AMOUNT="0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"  # uint256 max，无限授权
 DASHTEC_URL="https://dashtec.xyz"
 DEFAULT_KEYSTORE="$HOME/.aztec/keystore/key1.json"
 ZERO_AZTEC_ADDR="0x0000000000000000000000000000000000000000000000000000000000000000"
@@ -128,6 +131,12 @@ check_stk_allowance() {
         print_error "RPC 调用失败"
         return 1
     }
+    # 验证 hex 格式（可选增强）
+    if [[ ! "$result" =~ ^0x[a-fA-F0-9]{0,64}$ ]]; then
+        print_warning "RPC 返回非标准 hex: $result，回退到 0"
+        echo "0x0"
+        return 0
+    fi
     echo "$result"
 }
 
@@ -136,10 +145,10 @@ send_stk_approve() {
     local rpc_url=$1
     local funding_private_key=$2
 
-    print_info "发送 STK Approve（spender: $ROLLUP_CONTRACT，200k STAKE）"
+    print_info "发送 STK Approve（spender: $ROLLUP_CONTRACT，无限授权）"
 
     local approve_tx
-    approve_tx=$(cast send "$STAKE_TOKEN" "approve(address,uint256)" "$ROLLUP_CONTRACT" "$STAKE_AMOUNT" --private-key "$funding_private_key" --rpc-url "$rpc_url" --gas-limit 200000 --json 2>&1) || {
+    approve_tx=$(cast send "$STAKE_TOKEN" "approve(address,uint256)" "$ROLLUP_CONTRACT" "$APPROVE_AMOUNT" --private-key "$funding_private_key" --rpc-url "$rpc_url" --gas-limit 200000 --json 2>&1) || {
         print_error "Approve 发送失败：$approve_tx"
         return 1
     }
@@ -149,7 +158,7 @@ send_stk_approve() {
         status=$(echo "$approve_tx" | jq -r '.status // empty')
         txhash=$(echo "$approve_tx" | jq -r '.transactionHash // empty')
         if [[ "$status" == "1" || "$status" == "0x1" ]]; then
-            print_success "Approve 成功！Tx: $txhash"
+            print_success "无限 Approve 成功！Tx: $txhash (授权永久有效)"
             sleep 25
             return 0
         else
@@ -160,7 +169,7 @@ send_stk_approve() {
         local grep_status=$(echo "$approve_tx" | grep -i "status" | head -1 | sed -E 's/.*status[^0-9]*([0-9x]+).*/\1/' | tr -d ' ')
         local grep_hash=$(echo "$approve_tx" | grep -i "transactionHash\|0x[0-9a-f]\{64\}" | head -1 | sed -E 's/.*(0x[0-9a-f]{64}).*/\1/')
         if [[ "$grep_status" == "1" || "$grep_status" == "0x1" ]]; then
-            print_success "Approve 成功！Tx: ${grep_hash:-unknown}"
+            print_success "无限 Approve 成功！Tx: ${grep_hash:-unknown} (授权永久有效)"
             sleep 25
             return 0
         fi
@@ -436,20 +445,20 @@ register_validator_direct() {
 
     print_info "从 keystore 提取: Attester=$attester_addr, BLS PK=OK"
 
-    # 检查授权
+    # 检查授权（修复版：使用 bc 处理大整数）
     print_info "检查 STK 授权..."
     local allowance_hex allowance_dec
     allowance_hex=$(check_stk_allowance "$eth_rpc" "$funding_address") || {
         read -p "按任意键继续..."
         return 1
     }
-    allowance_dec=$((16#${allowance_hex#0x})) 2>/dev/null || allowance_dec=0
+    allowance_dec=$(echo "ibase=16; ${allowance_hex#0x}" | bc 2>/dev/null || echo "0")
     allowance_stk=$(echo "scale=0; $allowance_dec / 1000000000000000000" | bc 2>/dev/null || echo "0")
 
     print_info "当前授权: $allowance_stk STK (需 200k STK)"
 
-    if [ "$allowance_dec" -lt "$STAKE_AMOUNT" ]; then
-        print_warning "授权不足，尝试发送 approve..."
+    if echo "$allowance_dec < $STAKE_AMOUNT" | bc -l 2>/dev/null | grep -q 1; then
+        print_warning "授权不足，尝试发送无限 approve..."
         if ! send_stk_approve "$eth_rpc" "$funding_private_key"; then
             print_error "approve 失败，请手动检查或重试"
             read -p "按任意键继续..."
@@ -497,7 +506,7 @@ main_menu() {
         echo "6. 注册验证者 (手动模板) - 会提示输入 RPC/PK"
         echo "7. 退出"
         echo "========================================"
-        echo "提示: 2.1.2需rejoin！已airdrop 200k STAKE。"
+        echo "提示: 2.1.2需rejoin！已airdrop 200k STAKE。Approve 已设无限授权。"
         echo "========================================"
         read -p "选择 (1-7): " choice
         case $choice in
