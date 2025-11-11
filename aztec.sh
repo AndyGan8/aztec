@@ -10,6 +10,7 @@ set -euo pipefail
 # - 修复：STK 授权检查使用 bc 处理 uint256 大整数，避免 bash 溢出（v3.7.1 热补丁）
 # - 新增：Approve 设置为无限授权（uint256 max），避免反复 approve（v3.7.2 热补丁）
 # - 优化：选项6 先强制无限授权，再检查/注册（v3.7.3 热补丁）
+# - 新增：自动安装缺失依赖（Foundry/Docker/jq/bc 等，Ubuntu/Debian）（v3.7.4 热补丁）
 # ==================================================
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -17,7 +18,7 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-SCRIPT_VERSION="v3.7.3 (2025-11-11, 兼容2.1.2, 先无限授权 + 修复 uint256 溢出)"
+SCRIPT_VERSION="v3.7.4 (2025-11-11, 兼容2.1.2, 自动安装依赖 + 先无限授权)"
 
 # ------------------ 可配置项 ------------------
 AZTEC_DIR="/root/aztec-sequencer"
@@ -44,6 +45,86 @@ print_info() { echo -e "\033[1;34m[INFO]\033[0m $1"; }
 print_success() { echo -e "\033[1;32m[SUCCESS]\033[0m $1"; }
 print_error() { echo -e "\033[1;31m[ERROR]\033[0m $1"; }
 print_warning() { echo -e "\033[1;33m[WARNING]\033[0m $1"; }
+
+# ------------------ 自动安装依赖（针对 Ubuntu/Debian） ------------------
+install_missing_deps() {
+    local missing=("$@")
+    print_warning "检测到缺失命令: ${missing[*]}。开始自动安装（Ubuntu/Debian）..."
+
+    # 更新 apt
+    apt update -qq || print_error "apt update 失败"
+
+    # 安装基本工具（jq, bc, curl）
+    if [[ " ${missing[*]} " =~ " jq " ]] || [[ " ${missing[*]} " =~ " bc " ]] || [[ " ${missing[*]} " =~ " curl " ]]; then
+        print_info "安装 jq/bc/curl..."
+        apt install -y jq bc curl || print_error "apt install jq/bc/curl 失败"
+    fi
+
+    # 安装 Docker（如果缺失）
+    if [[ " ${missing[*]} " =~ " docker " ]]; then
+        print_info "安装 Docker..."
+        apt install -y ca-certificates curl gnupg lsb-release || print_error "Docker 依赖安装失败"
+        mkdir -p /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+        apt update -qq
+        apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || print_error "Docker 安装失败"
+        systemctl start docker
+        systemctl enable docker
+        print_success "Docker 安装完成"
+    fi
+
+    # 安装 Foundry（包括 cast）
+    if [[ " ${missing[*]} " =~ " cast " ]]; then
+        print_info "安装 Foundry（包括 cast）..."
+        curl -L https://foundry.paradigm.xyz | bash || print_error "Foundry 下载失败"
+        source ~/.bashrc
+        foundryup || print_error "foundryup 失败"
+        print_success "Foundry 安装完成（cast 已可用）"
+    fi
+
+    # Aztec CLI（需 Node.js，先检查/安装 Node）
+    if [[ " ${missing[*]} " =~ " aztec " ]]; then
+        print_warning "aztec CLI 需手动安装（npm global）。请运行: npm install -g @aztec/cli"
+        print_info "先安装 Node.js..."
+        curl -fsSL https://deb.nodesource.com/setup_20.x | bash - || print_error "NodeSource setup 失败"
+        apt install -y nodejs || print_error "Node.js 安装失败"
+        npm install -g @aztec/cli || print_error "aztec CLI 安装失败"
+        print_success "aztec CLI 安装完成"
+    fi
+
+    # 重新加载 PATH
+    export PATH="$HOME/.foundry/bin:$HOME/.aztec/bin:$PATH"
+    print_success "依赖安装完成！"
+}
+
+# ------------------ 环境检查 ------------------
+check_environment() {
+    print_info "检查环境..."
+    export PATH="$HOME/.foundry/bin:$HOME/.aztec/bin:$PATH"
+    local missing=()
+    for cmd in docker jq cast aztec bc curl; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            missing+=("$cmd")
+        fi
+    done
+    if [ ${#missing[@]} -gt 0 ]; then
+        install_missing_deps "${missing[@]}"
+        # 重新检查
+        missing=()
+        for cmd in docker jq cast aztec bc curl; do
+            if ! command -v "$cmd" >/dev/null 2>&1; then
+                missing+=("$cmd")
+            fi
+        done
+        if [ ${#missing[@]} -gt 0 ]; then
+            print_error "自动安装后仍缺少: ${missing[*]}。请手动安装后重试。"
+            return 1
+        fi
+    fi
+    print_success "环境检查通过"
+    return 0
+}
 
 # ------------------ 全局输入配置 ------------------
 get_global_config() {
@@ -72,24 +153,6 @@ get_global_config() {
         GLOBAL_FUNDING_PRIVATE_KEY="$input_funding_pk"
     fi
     print_success "全局配置加载: RPC=$GLOBAL_ETH_RPC, Funding PK=OK"
-}
-
-# ------------------ 环境检查 ------------------
-check_environment() {
-    print_info "检查环境..."
-    export PATH="$HOME/.foundry/bin:$HOME/.aztec/bin:$PATH"
-    local missing=()
-    for cmd in docker jq cast aztec bc curl; do
-        if ! command -v "$cmd" >/dev/null 2>&1; then
-            missing+=("$cmd")
-        fi
-    done
-    if [ ${#missing[@]} -gt 0 ]; then
-        print_error "缺少命令: ${missing[*]}。请安装后重试。"
-        return 1
-    fi
-    print_success "环境检查通过"
-    return 0
 }
 
 # ------------------ 验证 Aztec 地址格式 (0x + 64 hex) ------------------
