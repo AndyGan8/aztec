@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
 # ==================================================
-# Aztec 节点管理脚本（优化版 v3.7）
+# Aztec 节点管理脚本（优化版 v3.7.7）
 # 优化点：
 # - 全局配置输入移到选项1（安装节点）和选项6（注册）开始时（如果未设），主菜单不强制
 # - 私钥输入不隐藏（read -p）
@@ -13,6 +12,7 @@ set -euo pipefail
 # - 新增：自动安装缺失依赖（Foundry/Docker/jq/bc 等，Ubuntu/Debian）（v3.7.4 热补丁）
 # - 修复：PS1 unbound 错误，subshell 运行 foundryup（v3.7.5 热补丁）
 # - 修复：debian_chroot 等 unbound 变量，临时 set +u + 导出变量（v3.7.6 热补丁）
+# - 修复：Foundry 安装前预处理 unbound 变量，避免 curl | bash source .bashrc 时崩溃（v3.7.7 热补丁）
 # ==================================================
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -20,14 +20,13 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-SCRIPT_VERSION="v3.7.6 (2025-11-11, 兼容2.1.2, 自动安装依赖 + 先无限授权 + unbound 变量修复)"
+SCRIPT_VERSION="v3.7.7 (2025-11-11, 兼容2.1.2, 自动安装依赖 + 先无限授权 + Foundry unbound 预处理)"
 
 # ------------------ 可配置项 ------------------
 AZTEC_DIR="/root/aztec-sequencer"
 DATA_DIR="$AZTEC_DIR/data"
 KEY_DIR="$AZTEC_DIR/keys"
 AZTEC_IMAGE="aztecprotocol/aztec:latest"
-
 ROLLUP_CONTRACT="0xebd99ff0ff6677205509ae73f93d0ca52ac85d67"
 STAKE_TOKEN="0x139d2a7a0881e16332d7D1F8DB383A4507E1Ea7A"
 STAKE_AMOUNT="200000000000000000000"  # 200k STK (18 decimals)，用于比较（字符串形式用于 bc）
@@ -79,15 +78,27 @@ install_missing_deps() {
     # 安装 Foundry（包括 cast）
     if [[ " ${missing[*]} " =~ " cast " ]]; then
         print_info "安装 Foundry（包括 cast）..."
-        curl -L https://foundry.paradigm.xyz | bash || print_error "Foundry 下载失败"
-        # 临时关闭 unbound 检查，设置常见变量，避免 PS1/debian_chroot 等错误
+        
+        # 先准备环境，避免安装器 source .bashrc 时 unbound 错误
         set +u
-        export PS1="\u@\h:\w\$ "
-        export debian_chroot=""  # 针对 Debian/Ubuntu root .bashrc
-        source ~/.bashrc || true  # 忽略错误
-        set -u  # 恢复 unbound 检查
-        # 在 subshell 中运行 foundryup，避免影响主脚本
+        export debian_chroot=""
+        export PS1="\u@\h:\w\$ "  # 可选：稳定 PS1
+        
+        # 安装 foundryup
+        curl -L https://foundry.paradigm.xyz | bash || print_error "Foundry 下载失败"
+        
+        # Source 更新 PATH（安装器修改了 .bashrc）
+        source ~/.bashrc || true
+        
+        # 恢复 unbound
+        set -u
+        
+        # 在 subshell 运行 foundryup（避免主 shell 污染）
         (foundryup) || print_error "foundryup 失败"
+        
+        # 确保 PATH
+        export PATH="$HOME/.foundry/bin:$PATH"
+        
         print_success "Foundry 安装完成（cast 已可用）"
     fi
 
@@ -192,7 +203,6 @@ generate_address_from_private_key() {
 check_stk_allowance() {
     local rpc_url=$1
     local funding_address=$2
-
     local owner_padded=$(printf "%064s" "${funding_address#0x}" | tr ' ' '0')
     local spender_padded=$(printf "%064s" "${ROLLUP_CONTRACT#0x}" | tr ' ' '0')
     local data="0xdd62ed3e${owner_padded}${spender_padded}"
@@ -215,7 +225,6 @@ check_stk_allowance() {
 send_stk_approve() {
     local rpc_url=$1
     local funding_private_key=$2
-
     print_info "发送 STK 无限 Approve（spender: $ROLLUP_CONTRACT，无限授权）"
 
     local approve_tx
@@ -417,13 +426,13 @@ view_logs_and_status() {
     clear
     print_info "节点日志和状态"
     if is_container_running; then
-        echo "✅ 容器运行中"
+        echo " 容器运行中"
         docker logs aztec-sequencer --tail 50
         echo ""
         echo "API status:"
         curl -s --max-time 5 http://localhost:8080/status || echo "API 未响应"
     else
-        echo "❌ 容器未运行"
+        echo " 容器未运行"
     fi
     echo ""
     read -p "按回车返回主菜单..."
@@ -570,9 +579,9 @@ register_validator_direct() {
 main_menu() {
     while true; do
         clear
-        echo "========================================"
+        echo "========================================="
         echo " Aztec 节点管理 $SCRIPT_VERSION"
-        echo "========================================"
+        echo "========================================="
         echo "1. 安装/启动节点 (兼容2.1.2) - 会提示输入 RPC/PK"
         echo "2. 查看日志/状态"
         echo "3. 更新/重启 (pull 2.1.2)"
@@ -580,9 +589,9 @@ main_menu() {
         echo "5. 停止节点"
         echo "6. 注册验证者 (手动模板，先无限授权) - 会提示输入 RPC/PK"
         echo "7. 退出"
-        echo "========================================"
+        echo "========================================="
         echo "提示: 2.1.2需rejoin！已airdrop 200k STAKE。Approve 已设无限授权。"
-        echo "========================================"
+        echo "========================================="
         read -p "选择 (1-7): " choice
         case $choice in
             1) install_and_start_node ;;
