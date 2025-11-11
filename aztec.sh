@@ -9,6 +9,7 @@ set -euo pipefail
 # - 其他兼容2.1.2，手动注册模板
 # - 修复：STK 授权检查使用 bc 处理 uint256 大整数，避免 bash 溢出（v3.7.1 热补丁）
 # - 新增：Approve 设置为无限授权（uint256 max），避免反复 approve（v3.7.2 热补丁）
+# - 优化：选项6 先强制无限授权，再检查/注册（v3.7.3 热补丁）
 # ==================================================
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -16,7 +17,7 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-SCRIPT_VERSION="v3.7.2 (2025-11-11, 兼容2.1.2, 修复 uint256 溢出 + 无限授权)"
+SCRIPT_VERSION="v3.7.3 (2025-11-11, 兼容2.1.2, 先无限授权 + 修复 uint256 溢出)"
 
 # ------------------ 可配置项 ------------------
 AZTEC_DIR="/root/aztec-sequencer"
@@ -145,7 +146,7 @@ send_stk_approve() {
     local rpc_url=$1
     local funding_private_key=$2
 
-    print_info "发送 STK Approve（spender: $ROLLUP_CONTRACT，无限授权）"
+    print_info "发送 STK 无限 Approve（spender: $ROLLUP_CONTRACT，无限授权）"
 
     local approve_tx
     approve_tx=$(cast send "$STAKE_TOKEN" "approve(address,uint256)" "$ROLLUP_CONTRACT" "$APPROVE_AMOUNT" --private-key "$funding_private_key" --rpc-url "$rpc_url" --gas-limit 200000 --json 2>&1) || {
@@ -445,7 +446,15 @@ register_validator_direct() {
 
     print_info "从 keystore 提取: Attester=$attester_addr, BLS PK=OK"
 
-    # 检查授权（修复版：使用 bc 处理大整数）
+    # 新增：先强制执行无限授权（v3.7.3）
+    print_warning "先执行无限 STK 授权，确保注册顺利..."
+    if ! send_stk_approve "$eth_rpc" "$funding_private_key"; then
+        print_error "无限 approve 失败，请手动检查或重试"
+        read -p "按任意键继续..."
+        return 1
+    fi
+
+    # 检查授权（现在应为无限）
     print_info "检查 STK 授权..."
     local allowance_hex allowance_dec
     allowance_hex=$(check_stk_allowance "$eth_rpc" "$funding_address") || {
@@ -458,14 +467,10 @@ register_validator_direct() {
     print_info "当前授权: $allowance_stk STK (需 200k STK)"
 
     if echo "$allowance_dec < $STAKE_AMOUNT" | bc -l 2>/dev/null | grep -q 1; then
-        print_warning "授权不足，尝试发送无限 approve..."
-        if ! send_stk_approve "$eth_rpc" "$funding_private_key"; then
-            print_error "approve 失败，请手动检查或重试"
-            read -p "按任意键继续..."
-            return 1
-        fi
+        print_warning "授权仍不足（异常），请手动检查"
+        read -p "按任意键继续..."
     else
-        print_success "授权充足"
+        print_success "授权充足（无限）"
     fi
 
     # 显示手动命令模板
@@ -503,7 +508,7 @@ main_menu() {
         echo "3. 更新/重启 (pull 2.1.2)"
         echo "4. 性能监控"
         echo "5. 停止节点"
-        echo "6. 注册验证者 (手动模板) - 会提示输入 RPC/PK"
+        echo "6. 注册验证者 (手动模板，先无限授权) - 会提示输入 RPC/PK"
         echo "7. 退出"
         echo "========================================"
         echo "提示: 2.1.2需rejoin！已airdrop 200k STAKE。Approve 已设无限授权。"
