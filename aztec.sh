@@ -2,18 +2,10 @@
 set -euo pipefail
 
 # ==================================================
-# Aztec 节点管理脚本（优化版 v3）
+# Aztec 节点管理脚本（优化版 v3.1）
 # 优化点：
-# - 修复 view_logs_and_status 函数中的语法错误和不一致的 grep 模式
-# - 统一容器检查逻辑（使用 docker ps --filter name=aztec-sequencer）
-# - 改进 public_ip 获取：添加备用 URL 并增加超时
-# - 在 register_validator_direct 中，从 keystore 动态获取 attester/withdrawer 地址（如果存在），避免硬编码
-# - 添加停止节点功能（主菜单选项 7）
-# - 增强错误处理：更多 jq/cast 失败检查
-# - 统一日志尾行数为 50
-# - 改进输入验证：添加更多正则和空值检查
-# - 添加脚本版本显示和帮助提示
-# - 优化 docker-compose.yml 生成：使用 heredoc 变量替换更安全
+# - 移除 aztec validator-keys new 中的 --fee-recipient 选项（默认使用 attester 地址，避免零地址无效错误）
+# - 其他功能保持不变
 # ==================================================
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -21,7 +13,7 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-SCRIPT_VERSION="v3 (2025-11-11)"
+SCRIPT_VERSION="v3.1 (2025-11-11)"
 
 # ------------------ 可配置项 ------------------
 AZTEC_DIR="/root/aztec-sequencer"
@@ -34,7 +26,6 @@ STAKE_TOKEN="0x139d2a7a0881e16332d7D1F8DB383A4507E1Ea7A"
 STAKE_AMOUNT=200000000000000000000  # 200 STK (18 decimals)
 DASHTEC_URL="https://dashtec.xyz"
 DEFAULT_KEYSTORE="$HOME/.aztec/keystore/key1.json"
-DEFAULT_FEE_RECIPIENT="0x0000000000000000000000000000000000000000"
 
 # RPC 默认值从环境变量读取，提示中不显示具体值
 # export DEFAULT_ETH_RPC="https://rpc.sepolia.org"
@@ -215,7 +206,7 @@ install_and_start_node() {
     case $mode_choice in
         1)
             rm -rf "$HOME/.aztec/keystore" 2>/dev/null || true
-            aztec validator-keys new --fee-recipient "$DEFAULT_FEE_RECIPIENT" || { print_error "生成键失败"; read -p "按任意键继续..."; return 1; }
+            aztec validator-keys new || { print_error "生成键失败"; read -p "按任意键继续..."; return 1; }
             if [[ ! -f "$DEFAULT_KEYSTORE" ]]; then
                 print_error "新生成后未找到 keystore: $DEFAULT_KEYSTORE"
                 read -p "按任意键继续..."
@@ -430,7 +421,7 @@ register_validator_direct() {
     local ATTESTER WITHDRAWER keystore_path
     if [[ -f "$KEY_DIR/key1.json" ]]; then
         keystore_path="$KEY_DIR/key1.json"
-        ATTESTER=$(generate_address_from_private_key "$(jq -r '.validators[0].attester.eth' "$keystore_path")") || ATTESTER="$DEFAULT_FEE_RECIPIENT"
+        ATTESTER=$(generate_address_from_private_key "$(jq -r '.validators[0].attester.eth' "$keystore_path")") || ATTESTER="0x0000000000000000000000000000000000000000"
         WITHDRAWER="$ATTESTER"
         print_info "使用 keystore 中的 attester: $ATTESTER"
     else
