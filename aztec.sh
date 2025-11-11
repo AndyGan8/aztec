@@ -282,8 +282,18 @@ EOF
 # ------------------ 查看日志与状态 ------------------
 view_logs_and_status() {
     clear
-    print_info "节点日志/状态"
-    if docker ps --format '{{.Names}}' | grep -q '^aztec-sequencer$'; then
+    print_info "节点日志和状态"
+    if docker ps | grep -q aztec-sequencer; then
+        echo "✅ 运行中"
+        docker logs aztec-sequencer --tail 50
+        echo ""
+        curl -s http://localhost:8080/status || echo "API 未响应"
+    else
+        echo "❌ 未运行"
+    fi
+    echo ""
+    read -p "按回车返回主菜单..." _
+}}' | grep -q '^aztec-sequencer$'; then
         echo "✅ 容器运行中"
         docker logs aztec-sequencer --tail 80
         echo "\nAPI status:"
@@ -311,10 +321,14 @@ update_and_restart_node() {
 # ------------------ 性能监控 ------------------
 monitor_performance() {
     clear
-    print_info "性能信息"
+    print_info "性能监控"
     free -h
-    echo
-    df -h | sed -n '1,20p'
+    echo ""
+    df -h
+    echo ""
+    top -b -n 1 | head -20
+    echo ""
+    read -p "按回车返回主菜单..." _
 }
 
 # ------------------ 手动注册验证者 ------------------
