@@ -2,12 +2,11 @@
 set -euo pipefail
 
 # ==================================================
-# Aztec 节点管理脚本（优化版 v3.3）
-# 优化点（兼容2.1.2更新）：
-# - 支持助记词生成密钥（--mnemonic，可重现BLS/ETH keys）
-# - 注册后提示设置Publisher和fund sepETH
-# - 启动/注册时提醒rejoin testnet（新rollup）
-# - 其他功能保持不变
+# Aztec 节点管理脚本（优化版 v3.4）
+# 优化点（修复 fee-recipient 错误）：
+# - fee-recipient 默认使用零 Aztec 地址 (0x000...000, 64 hex)，避免 ETH 地址无效
+# - 添加 64 hex 验证；生成后提示编辑 keystore
+# - 兼容2.1.2，助记词支持保持
 # ==================================================
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -15,7 +14,7 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-SCRIPT_VERSION="v3.3 (2025-11-11, 兼容2.1.2)"
+SCRIPT_VERSION="v3.4 (2025-11-11, 兼容2.1.2)"
 
 # ------------------ 可配置项 ------------------
 AZTEC_DIR="/root/aztec-sequencer"
@@ -28,7 +27,8 @@ STAKE_TOKEN="0x139d2a7a0881e16332d7D1F8DB383A4507E1Ea7A"
 STAKE_AMOUNT=200000000000000000000  # 200k STK (18 decimals)
 DASHTEC_URL="https://dashtec.xyz"
 DEFAULT_KEYSTORE="$HOME/.aztec/keystore/key1.json"
-PUBLISHER_GUIDE="https://docs.aztec.network/the_aztec_network/setup/sequencer_management#setting-up-a-publisher"  # 新要求指南
+ZERO_AZTEC_ADDR="0x0000000000000000000000000000000000000000000000000000000000000000"
+PUBLISHER_GUIDE="https://docs.aztec.network/the_aztec_network/setup/sequencer_management#setting-up-a-publisher"
 
 # RPC 默认值从环境变量读取，提示中不显示具体值
 # export DEFAULT_ETH_RPC="https://rpc.sepolia.org"
@@ -58,11 +58,11 @@ check_environment() {
     return 0
 }
 
-# ------------------ 验证 ETH 地址格式 ------------------
-validate_eth_address() {
+# ------------------ 验证 Aztec 地址格式 (0x + 64 hex) ------------------
+validate_aztec_address() {
     local address=$1
-    if [[ ! "$address" =~ ^0x[a-fA-F0-9]{40}$ ]]; then
-        print_error "无效 ETH 地址格式（需 0x + 40 位 hex）"
+    if [[ ! "$address" =~ ^0x[a-fA-F0-9]{64}$ ]]; then
+        print_error "无效 Aztec 地址格式（需 0x + 64 位 hex，如零地址）"
         return 1
     fi
     return 0
@@ -220,12 +220,12 @@ install_and_start_node() {
     case $mode_choice in
         1)
             rm -rf "$HOME/.aztec/keystore" 2>/dev/null || true
-            read -p "Fee Recipient ETH 地址（回车使用 funding 地址 $funding_address）: " FEE_RECIPIENT_INPUT
-            FEE_RECIPIENT=${FEE_RECIPIENT_INPUT:-$funding_address}
-            if ! validate_eth_address "$FEE_RECIPIENT"; then
-                print_error "Fee Recipient 地址无效，请重试"
-                read -p "按任意键继续..."
-                return 1
+            read -p "Fee Recipient Aztec 地址（回车使用零地址 $ZERO_AZTEC_ADDR；需 0x + 64 hex）: " FEE_RECIPIENT_INPUT
+            FEE_RECIPIENT=${FEE_RECIPIENT_INPUT:-$ZERO_AZTEC_ADDR}
+            if ! validate_aztec_address "$FEE_RECIPIENT"; then
+                print_error "Fee Recipient 无效，回退到零地址"
+                FEE_RECIPIENT="$ZERO_AZTEC_ADDR"
+                print_warning "使用零地址: $FEE_RECIPIENT (占位符)"
             fi
             print_info "使用 Fee Recipient: $FEE_RECIPIENT"
             read -p "助记词 (12/24词，BIP39；回车随机生成，用于重现BLS/ETH keys): " MNEMONIC_INPUT
@@ -240,6 +240,8 @@ install_and_start_node() {
                 return 1
             fi
             keystore_path="$DEFAULT_KEYSTORE"
+            print_warning "提示：后续编辑 keystore 的 'feeRecipient' 为自定义 Aztec 地址"
+            echo "命令: jq '.validators[0].feeRecipient = \"你的Aztec地址\"' $DEFAULT_KEYSTORE > temp.json && mv temp.json $DEFAULT_KEYSTORE"
             ;;
         2)
             read -p "keystore 路径 (回车使用 $DEFAULT_KEYSTORE): " keystore_path_input
