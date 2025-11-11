@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # ==================================================
-# Aztec 节点管理脚本（优化版 v3.7.9）
+# Aztec 节点管理脚本（优化版 v3.7.10）
 # 优化点：
 # - 全局配置输入移到选项1（安装节点）和选项6（注册）开始时（如果未设），主菜单不强制
 # - 私钥输入不隐藏（read -p）
@@ -15,6 +15,7 @@ set -euo pipefail
 # - 修复：Foundry 安装前预处理 unbound 变量，避免 curl | bash source .bashrc 时崩溃（v3.7.7 热补丁）
 # - 新增：Aztec CLI 版本检查与自动升级到 >=2.1.2（v3.7.8 热补丁，确保 validator-keys 可用）
 # - 优化：环境检查中始终强制 Aztec CLI 版本验证/升级（v3.7.9 热补丁，避免 silent fail）
+# - 修复：Aztec CLI 安装切换到官方 bash 安装器（避免 npm/node-gyp/make 错误），并使用 aztec-up 升级（v3.7.10 热补丁）
 # ==================================================
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -22,7 +23,7 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-SCRIPT_VERSION="v3.7.9 (2025-11-11, 兼容2.1.2, 自动安装依赖 + 先无限授权 + Foundry unbound 预处理 + Aztec CLI 强制版本检查)"
+SCRIPT_VERSION="v3.7.10 (2025-11-11, 兼容2.1.2, 自动安装依赖 + 先无限授权 + Foundry unbound 预处理 + Aztec CLI 官方安装)"
 
 # ------------------ 可配置项 ------------------
 AZTEC_DIR="/root/aztec-sequencer"
@@ -67,8 +68,9 @@ install_missing_deps() {
     local missing=("$@")
     print_warning "检测到缺失命令: ${missing[*]}。开始自动安装（Ubuntu/Debian）..."
 
-    # 更新 apt
+    # 更新 apt 并安装 build-essential（用于 node-gyp 等）
     apt update -qq || print_error "apt update 失败"
+    apt install -y build-essential || print_warning "build-essential 安装警告（可选用于 npm native builds）"
 
     # 安装基本工具（jq, bc, curl）
     if [[ " ${missing[*]} " =~ " jq " ]] || [[ " ${missing[*]} " =~ " bc " ]] || [[ " ${missing[*]} " =~ " curl " ]]; then
@@ -117,13 +119,15 @@ install_missing_deps() {
         print_success "Foundry 安装完成（cast 已可用）"
     fi
 
-    # Aztec CLI（需 Node.js，先检查/安装 Node）
+    # Aztec CLI（需 Node.js，使用官方安装器）
     if [[ " ${missing[*]} " =~ " aztec " ]]; then
-        print_info "安装 Node.js 和 aztec CLI..."
+        print_info "安装 Node.js v20 和 Aztec CLI（官方方法）..."
+        # 安装 Node 20
         curl -fsSL https://deb.nodesource.com/setup_20.x | bash - || print_error "NodeSource setup 失败"
         apt install -y nodejs || print_error "Node.js 安装失败"
-        npm install -g @aztec/cli || print_error "aztec CLI 安装失败"
-        print_success "aztec CLI 安装完成"
+        # 官方 Aztec 安装（包括 CLI 和工具链，避免 npm 问题）
+        bash -i <(curl -s https://install.aztec.network) || print_error "Aztec 官方安装失败"
+        print_success "Aztec CLI 安装完成（使用官方 bash 安装器）"
     fi
 
     # 重新加载 PATH
@@ -156,30 +160,28 @@ check_environment() {
         fi
     fi
 
-    # 新增 v3.7.9：始终检查并升级 Aztec CLI 版本（即使已安装）
+    # 始终检查并升级 Aztec CLI（使用 aztec-up）
     if command -v aztec >/dev/null 2>&1; then
         local aztec_ver
         aztec_ver=$(aztec --version 2>/dev/null | grep -oE '([0-9]+\.[0-9]+\.[0-9]+)' | head -1 || echo "0.0.0")
         print_info "当前 Aztec CLI 版本: $aztec_ver"
         if [[ "$(compare_versions "$aztec_ver" "2.1.2")" == "1" ]]; then
-            print_warning "Aztec CLI 版本 $aztec_ver 过旧（需 >=2.1.2 以支持 validator-keys），强制升级到 latest..."
-            npm uninstall -g @aztec/cli || true
-            npm cache clean --force || true
-            if ! npm install -g @aztec/cli@latest --registry https://registry.npmjs.org/; then
-                print_error "Aztec CLI 升级失败，请手动运行: npm install -g @aztec/cli@latest"
+            print_warning "Aztec CLI 版本 $aztec_ver 过旧（需 >=2.1.2 以支持 validator-keys），使用 aztec-up 升级..."
+            if ! aztec-up; then
+                print_error "aztec-up 升级失败，请手动运行: aztec-up"
                 return 1
             fi
             aztec_ver=$(aztec --version 2>/dev/null | grep -oE '([0-9]+\.[0-9]+\.[0-9]+)' | head -1 || echo "0.0.0")
             print_success "升级后版本: $aztec_ver"
             # 验证命令
             if ! aztec validator-keys --help >/dev/null 2>&1; then
-                print_error "升级后 validator-keys 仍不可用，请检查 PATH 或手动安装"
+                print_error "升级后 validator-keys 仍不可用，请检查安装"
                 return 1
             fi
         else
             print_success "Aztec CLI 版本 $aztec_ver 符合要求"
             # 快速验证命令
-            aztec validator-keys --help >/dev/null 2>&1 || print_warning "validator-keys 命令异常，请手动升级"
+            aztec validator-keys --help >/dev/null 2>&1 || print_warning "validator-keys 命令异常，请运行 aztec-up"
         fi
     else
         print_error "aztec 命令不可用，安装失败"
