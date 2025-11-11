@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # ==================================================
-# Aztec 节点管理脚本（优化版 v3.7.8）
+# Aztec 节点管理脚本（优化版 v3.7.9）
 # 优化点：
 # - 全局配置输入移到选项1（安装节点）和选项6（注册）开始时（如果未设），主菜单不强制
 # - 私钥输入不隐藏（read -p）
@@ -14,6 +14,7 @@ set -euo pipefail
 # - 修复：debian_chroot 等 unbound 变量，临时 set +u + 导出变量（v3.7.6 热补丁）
 # - 修复：Foundry 安装前预处理 unbound 变量，避免 curl | bash source .bashrc 时崩溃（v3.7.7 热补丁）
 # - 新增：Aztec CLI 版本检查与自动升级到 >=2.1.2（v3.7.8 热补丁，确保 validator-keys 可用）
+# - 优化：环境检查中始终强制 Aztec CLI 版本验证/升级（v3.7.9 热补丁，避免 silent fail）
 # ==================================================
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -21,7 +22,7 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-SCRIPT_VERSION="v3.7.8 (2025-11-11, 兼容2.1.2, 自动安装依赖 + 先无限授权 + Foundry unbound 预处理 + Aztec CLI 版本检查)"
+SCRIPT_VERSION="v3.7.9 (2025-11-11, 兼容2.1.2, 自动安装依赖 + 先无限授权 + Foundry unbound 预处理 + Aztec CLI 强制版本检查)"
 
 # ------------------ 可配置项 ------------------
 AZTEC_DIR="/root/aztec-sequencer"
@@ -51,14 +52,14 @@ print_warning() { echo -e "\033[1;33m[WARNING]\033[0m $1"; }
 # ------------------ 版本比较函数（用于 Aztec CLI） ------------------
 version_to_tuple() {
     local ver=$1
-    echo $ver | tr '.' '\n' | awk '{printf "%04d", $1} {printf "%04d", $2} {printf "%04d", $3}'
+    echo $ver | tr '.' '\n' | awk '{printf "%04d", $1} {printf "%04d", $2} {printf "%04d", $3}' | tr '\n' '.'
 }
 
 compare_versions() {
     local ver1=$1 ver2=$2
     local t1=$(version_to_tuple "$ver1")
     local t2=$(version_to_tuple "$ver2")
-    if [[ "$t1" -lt "$t2" ]]; then echo "1"; elif [[ "$t1" -gt "$t2" ]]; then echo "-1"; else echo "0"; fi
+    if [[ "$t1" < "$t2" ]]; then echo "1"; elif [[ "$t1" > "$t2" ]]; then echo "-1"; else echo "0"; fi
 }
 
 # ------------------ 自动安装依赖（针对 Ubuntu/Debian） ------------------
@@ -125,25 +126,6 @@ install_missing_deps() {
         print_success "aztec CLI 安装完成"
     fi
 
-    # 新增：检查并升级 Aztec CLI 到 >=2.1.2（v3.7.8）
-    if command -v aztec >/dev/null 2>&1; then
-        local aztec_ver
-        aztec_ver=$(aztec --version 2>/dev/null | grep -oE '([0-9]+\.[0-9]+\.[0-9]+)' | head -1 || echo "0.0.0")
-        print_info "当前 Aztec CLI 版本: $aztec_ver"
-        if [[ "$(compare_versions "$aztec_ver" "2.1.2")" == "1" ]]; then
-            print_warning "Aztec CLI 版本 $aztec_ver 过旧（需 >=2.1.2 以支持 validator-keys），升级到 latest..."
-            npm install -g @aztec/cli@latest --registry https://registry.npmjs.org/ || print_error "Aztec CLI 升级失败"
-            aztec_ver=$(aztec --version 2>/dev/null | grep -oE '([0-9]+\.[0-9]+\.[0-9]+)' | head -1 || echo "0.0.0")
-            print_success "升级后版本: $aztec_ver"
-        else
-            print_success "Aztec CLI 版本 $aztec_ver 符合要求"
-        fi
-        # 验证 validator-keys 命令
-        if ! aztec validator-keys --help >/dev/null 2>&1; then
-            print_error "validator-keys 命令不可用，请手动检查安装"
-        fi
-    fi
-
     # 重新加载 PATH
     export PATH="$HOME/.foundry/bin:$HOME/.aztec/bin:$PATH"
     print_success "依赖安装完成！"
@@ -173,6 +155,37 @@ check_environment() {
             return 1
         fi
     fi
+
+    # 新增 v3.7.9：始终检查并升级 Aztec CLI 版本（即使已安装）
+    if command -v aztec >/dev/null 2>&1; then
+        local aztec_ver
+        aztec_ver=$(aztec --version 2>/dev/null | grep -oE '([0-9]+\.[0-9]+\.[0-9]+)' | head -1 || echo "0.0.0")
+        print_info "当前 Aztec CLI 版本: $aztec_ver"
+        if [[ "$(compare_versions "$aztec_ver" "2.1.2")" == "1" ]]; then
+            print_warning "Aztec CLI 版本 $aztec_ver 过旧（需 >=2.1.2 以支持 validator-keys），强制升级到 latest..."
+            npm uninstall -g @aztec/cli || true
+            npm cache clean --force || true
+            if ! npm install -g @aztec/cli@latest --registry https://registry.npmjs.org/; then
+                print_error "Aztec CLI 升级失败，请手动运行: npm install -g @aztec/cli@latest"
+                return 1
+            fi
+            aztec_ver=$(aztec --version 2>/dev/null | grep -oE '([0-9]+\.[0-9]+\.[0-9]+)' | head -1 || echo "0.0.0")
+            print_success "升级后版本: $aztec_ver"
+            # 验证命令
+            if ! aztec validator-keys --help >/dev/null 2>&1; then
+                print_error "升级后 validator-keys 仍不可用，请检查 PATH 或手动安装"
+                return 1
+            fi
+        else
+            print_success "Aztec CLI 版本 $aztec_ver 符合要求"
+            # 快速验证命令
+            aztec validator-keys --help >/dev/null 2>&1 || print_warning "validator-keys 命令异常，请手动升级"
+        fi
+    else
+        print_error "aztec 命令不可用，安装失败"
+        return 1
+    fi
+
     print_success "环境检查通过"
     return 0
 }
