@@ -12,6 +12,7 @@ set -euo pipefail
 # - 优化：选项6 先强制无限授权，再检查/注册（v3.7.3 热补丁）
 # - 新增：自动安装缺失依赖（Foundry/Docker/jq/bc 等，Ubuntu/Debian）（v3.7.4 热补丁）
 # - 修复：PS1 unbound 错误，subshell 运行 foundryup（v3.7.5 热补丁）
+# - 修复：debian_chroot 等 unbound 变量，临时 set +u + 导出变量（v3.7.6 热补丁）
 # ==================================================
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -19,7 +20,7 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-SCRIPT_VERSION="v3.7.5 (2025-11-11, 兼容2.1.2, 自动安装依赖 + 先无限授权 + PS1 修复)"
+SCRIPT_VERSION="v3.7.6 (2025-11-11, 兼容2.1.2, 自动安装依赖 + 先无限授权 + unbound 变量修复)"
 
 # ------------------ 可配置项 ------------------
 AZTEC_DIR="/root/aztec-sequencer"
@@ -79,9 +80,12 @@ install_missing_deps() {
     if [[ " ${missing[*]} " =~ " cast " ]]; then
         print_info "安装 Foundry（包括 cast）..."
         curl -L https://foundry.paradigm.xyz | bash || print_error "Foundry 下载失败"
-        # 临时设置 PS1 避免 unbound 错误
+        # 临时关闭 unbound 检查，设置常见变量，避免 PS1/debian_chroot 等错误
+        set +u
         export PS1="\u@\h:\w\$ "
+        export debian_chroot=""  # 针对 Debian/Ubuntu root .bashrc
         source ~/.bashrc || true  # 忽略错误
+        set -u  # 恢复 unbound 检查
         # 在 subshell 中运行 foundryup，避免影响主脚本
         (foundryup) || print_error "foundryup 失败"
         print_success "Foundry 安装完成（cast 已可用）"
