@@ -2,9 +2,11 @@
 set -euo pipefail
 
 # ==================================================
-# Aztec 节点管理脚本（优化版 v3.1）
-# 优化点：
-# - 移除 aztec validator-keys new 中的 --fee-recipient 选项（默认使用 attester 地址，避免零地址无效错误）
+# Aztec 节点管理脚本（优化版 v3.3）
+# 优化点（兼容2.1.2更新）：
+# - 支持助记词生成密钥（--mnemonic，可重现BLS/ETH keys）
+# - 注册后提示设置Publisher和fund sepETH
+# - 启动/注册时提醒rejoin testnet（新rollup）
 # - 其他功能保持不变
 # ==================================================
 
@@ -13,7 +15,7 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-SCRIPT_VERSION="v3.1 (2025-11-11)"
+SCRIPT_VERSION="v3.3 (2025-11-11, 兼容2.1.2)"
 
 # ------------------ 可配置项 ------------------
 AZTEC_DIR="/root/aztec-sequencer"
@@ -23,9 +25,10 @@ AZTEC_IMAGE="aztecprotocol/aztec:latest"
 
 ROLLUP_CONTRACT="0xebd99ff0ff6677205509ae73f93d0ca52ac85d67"
 STAKE_TOKEN="0x139d2a7a0881e16332d7D1F8DB383A4507E1Ea7A"
-STAKE_AMOUNT=200000000000000000000  # 200 STK (18 decimals)
+STAKE_AMOUNT=200000000000000000000  # 200k STK (18 decimals)
 DASHTEC_URL="https://dashtec.xyz"
 DEFAULT_KEYSTORE="$HOME/.aztec/keystore/key1.json"
+PUBLISHER_GUIDE="https://docs.aztec.network/the_aztec_network/setup/sequencer_management#setting-up-a-publisher"  # 新要求指南
 
 # RPC 默认值从环境变量读取，提示中不显示具体值
 # export DEFAULT_ETH_RPC="https://rpc.sepolia.org"
@@ -52,6 +55,16 @@ check_environment() {
         return 1
     fi
     print_success "环境检查通过"
+    return 0
+}
+
+# ------------------ 验证 ETH 地址格式 ------------------
+validate_eth_address() {
+    local address=$1
+    if [[ ! "$address" =~ ^0x[a-fA-F0-9]{40}$ ]]; then
+        print_error "无效 ETH 地址格式（需 0x + 40 位 hex）"
+        return 1
+    fi
     return 0
 }
 
@@ -94,7 +107,7 @@ send_stk_approve() {
     local rpc_url=$1
     local funding_private_key=$2
 
-    print_info "发送 STK Approve（spender: $ROLLUP_CONTRACT）"
+    print_info "发送 STK Approve（spender: $ROLLUP_CONTRACT，200k STAKE）"
 
     local approve_tx
     approve_tx=$(cast send "$STAKE_TOKEN" "approve(address,uint256)" "$ROLLUP_CONTRACT" "$STAKE_AMOUNT" --private-key "$funding_private_key" --rpc-url "$rpc_url" --gas-limit 200000 --json 2>&1) || {
@@ -157,7 +170,8 @@ get_public_ip() {
 # ------------------ 安装并启动节点 ------------------
 install_and_start_node() {
     clear
-    print_info "Aztec 节点安装/启动 (v$SCRIPT_VERSION)"
+    print_info "Aztec 节点安装/启动 (v$SCRIPT_VERSION, 兼容2.1.2)"
+    print_warning "注意：2.1.2更新需重新注册验证者（选项6）"
     if ! check_environment; then
         print_error "环境检查失败"
         read -p "按任意键继续..."
@@ -196,17 +210,30 @@ install_and_start_node() {
         read -p "按任意键继续..."
         return 1
     }
-    print_info "Funding 地址: $funding_address"
+    print_info "Funding 地址: $funding_address (应已airdrop 200k STAKE)"
 
     echo
     echo "密钥模式：1. 新生成  2. 加载 keystore"
     read -p "选择 (1-2): " mode_choice
 
-    local new_eth_key new_bls_key new_address keystore_path
+    local new_eth_key new_bls_key new_address keystore_path FEE_RECIPIENT MNEMONIC_CMD=""
     case $mode_choice in
         1)
             rm -rf "$HOME/.aztec/keystore" 2>/dev/null || true
-            aztec validator-keys new || { print_error "生成键失败"; read -p "按任意键继续..."; return 1; }
+            read -p "Fee Recipient ETH 地址（回车使用 funding 地址 $funding_address）: " FEE_RECIPIENT_INPUT
+            FEE_RECIPIENT=${FEE_RECIPIENT_INPUT:-$funding_address}
+            if ! validate_eth_address "$FEE_RECIPIENT"; then
+                print_error "Fee Recipient 地址无效，请重试"
+                read -p "按任意键继续..."
+                return 1
+            fi
+            print_info "使用 Fee Recipient: $FEE_RECIPIENT"
+            read -p "助记词 (12/24词，BIP39；回车随机生成，用于重现BLS/ETH keys): " MNEMONIC_INPUT
+            if [[ -n "$MNEMONIC_INPUT" ]]; then
+                MNEMONIC_CMD="--mnemonic \"$MNEMONIC_INPUT\""
+                print_warning "使用助记词生成（保存好以防丢失！）"
+            fi
+            aztec validator-keys new --fee-recipient "$FEE_RECIPIENT" $MNEMONIC_CMD || { print_error "生成键失败"; read -p "按任意键继续..."; return 1; }
             if [[ ! -f "$DEFAULT_KEYSTORE" ]]; then
                 print_error "新生成后未找到 keystore: $DEFAULT_KEYSTORE"
                 read -p "按任意键继续..."
@@ -294,11 +321,11 @@ EOF
     print_info "启动容器..."
     cd "$AZTEC_DIR"
     docker compose up -d || { print_error "docker 启动失败"; read -p "按任意键继续..."; return 1; }
-    sleep 8
+    sleep 10  # 稍长等待新版初始化
     docker logs aztec-sequencer --tail 20 || true
 
     if curl -s --max-time 5 http://localhost:8080/status >/dev/null 2>&1; then
-        print_success "节点启动成功"
+        print_success "节点启动成功 (2.1.2)"
     else
         print_warning "节点可能仍在初始化，稍后检查日志"
     fi
@@ -326,7 +353,7 @@ view_logs_and_status() {
 # ------------------ 更新并重启 ------------------
 update_and_restart_node() {
     clear
-    print_info "更新节点镜像并重启"
+    print_info "更新节点镜像并重启 (拉取2.1.2)"
     if [[ ! -d "$AZTEC_DIR" ]]; then
         print_error "目录不存在: $AZTEC_DIR"
         read -p "按任意键继续..."
@@ -342,8 +369,8 @@ update_and_restart_node() {
         read -p "按任意键继续..."
         return 1
     fi
-    print_success "更新并重启完成"
-    sleep 5
+    print_success "更新并重启完成 (2.1.2)"
+    sleep 10
     docker logs aztec-sequencer --tail 20 || true
     read -p "按任意键返回主菜单..."
 }
@@ -377,7 +404,7 @@ monitor_performance() {
 # ------------------ 手动注册验证者 ------------------
 register_validator_direct() {
     clear
-    print_info "验证者注册（手动）"
+    print_info "验证者注册（手动，兼容2.1.2 rejoin）"
     if ! check_environment; then
         print_error "环境检查失败"
         read -p "按任意键继续..."
@@ -422,7 +449,7 @@ register_validator_direct() {
     if [[ -f "$KEY_DIR/key1.json" ]]; then
         keystore_path="$KEY_DIR/key1.json"
         ATTESTER=$(generate_address_from_private_key "$(jq -r '.validators[0].attester.eth' "$keystore_path")") || ATTESTER="0x0000000000000000000000000000000000000000"
-        WITHDRAWER="$ATTESTER"
+        WITHDRAWER="$ATTESTER"  # 默认相同，可自定义
         print_info "使用 keystore 中的 attester: $ATTESTER"
     else
         # 回退到硬编码（优化后可移除）
@@ -432,7 +459,7 @@ register_validator_direct() {
     fi
 
     print_info "检查 STK 授权..."
-    local allowance_hex allowance_dec required_dec=200  # 简化：直接用 200 STK 单位
+    local allowance_hex allowance_dec
     allowance_hex=$(check_stk_allowance "$ETH_RPC" "$funding_address") || {
         read -p "按任意键继续..."
         return 1
@@ -440,7 +467,7 @@ register_validator_direct() {
     allowance_dec=$((16#${allowance_hex#0x})) 2>/dev/null || allowance_dec=0
     allowance_stk=$(echo "scale=0; $allowance_dec / 1000000000000000000" | bc 2>/dev/null || echo "0")
 
-    print_info "当前授权: $allowance_stk STK (需 200 STK)"
+    print_info "当前授权: $allowance_stk STK (需 200k STK)"
 
     if [ "$allowance_dec" -lt "$STAKE_AMOUNT" ]; then
         print_warning "授权不足，尝试发送 approve..."
@@ -456,7 +483,7 @@ register_validator_direct() {
     print_info "注册参数："
     echo "  Attester: $ATTESTER"
     echo "  Withdrawer: $WITHDRAWER"
-    echo "  Rollup: $ROLLUP_CONTRACT"
+    echo "  Rollup: $ROLLUP_CONTRACT (新合约)"
     read -p "确认执行注册？按 Enter 继续或 Ctrl+C 取消..."
 
     if aztec add-l1-validator \
@@ -467,8 +494,12 @@ register_validator_direct() {
         --withdrawer "$WITHDRAWER" \
         --bls-secret-key "$BLS_SECRET_KEY" \
         --rollup "$ROLLUP_CONTRACT"; then
-        print_success "注册成功！可在 dashtec/区块浏览器查看"
+        print_success "注册成功！(rejoin testnet) 可在 dashtec/区块浏览器查看"
         echo "Dashtec: $DASHTEC_URL/validator/$ATTESTER"
+        echo ""
+        print_warning "2.1.2新要求：设置Publisher或为Attester ($ATTESTER) fund sepETH！"
+        print_info "指南: $PUBLISHER_GUIDE"
+        echo "用funding私钥转ETH到Attester: cast send $ATTESTER --value 0.1ether --private-key $FUNDING_PRIVATE_KEY --rpc-url $ETH_RPC"
     else
         print_error "注册失败，请查看 aztec CLI 输出"
     fi
@@ -482,15 +513,15 @@ main_menu() {
         echo "========================================"
         echo " Aztec 节点管理 $SCRIPT_VERSION"
         echo "========================================"
-        echo "1. 安装/启动节点"
+        echo "1. 安装/启动节点 (兼容2.1.2)"
         echo "2. 查看日志/状态"
-        echo "3. 更新/重启"
+        echo "3. 更新/重启 (pull 2.1.2)"
         echo "4. 性能监控"
         echo "5. 停止节点"
-        echo "6. 注册验证者 (手动)"
+        echo "6. 注册验证者 (rejoin testnet)"
         echo "7. 退出"
         echo "========================================"
-        echo "提示: RPC 默认值请通过环境变量设置 (export DEFAULT_ETH_RPC=...)"
+        echo "提示: 2.1.2需rejoin！已airdrop 200k STAKE。RPC默认用环境变量。"
         echo "========================================"
         read -p "选择 (1-7): " choice
         case $choice in
