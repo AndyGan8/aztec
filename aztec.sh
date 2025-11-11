@@ -2,12 +2,11 @@
 set -euo pipefail
 
 # ==================================================
-# Aztec 节点管理脚本（优化版 v3.6）
+# Aztec 节点管理脚本（优化版 v3.7）
 # 优化点：
-# - 私钥输入不隐藏（read -p，无 -s），方便调试
-# - 选项6 手动注册模板
-# - 全局 RPC/PK 输入，避免重复
-# - 兼容2.1.2，零Aztec地址默认
+# - 全局配置输入移到选项1（安装节点）和选项6（注册）开始时（如果未设），主菜单不强制
+# - 私钥输入不隐藏（read -p）
+# - 其他兼容2.1.2，手动注册模板
 # ==================================================
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -15,7 +14,7 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-SCRIPT_VERSION="v3.6 (2025-11-11, 兼容2.1.2)"
+SCRIPT_VERSION="v3.7 (2025-11-11, 兼容2.1.2)"
 
 # ------------------ 可配置项 ------------------
 AZTEC_DIR="/root/aztec-sequencer"
@@ -206,6 +205,9 @@ install_and_start_node() {
         read -p "按任意键继续..."
         return 1
     fi
+
+    # 在这里获取全局配置（如果未设）
+    get_global_config
 
     echo
     echo "密钥模式：1. 新生成  2. 加载 keystore"
@@ -408,6 +410,9 @@ register_validator_direct() {
         return 1
     fi
 
+    # 在这里获取全局配置（如果未设）
+    get_global_config
+
     local eth_rpc="$GLOBAL_ETH_RPC"
     local funding_private_key="$GLOBAL_FUNDING_PRIVATE_KEY"
     local funding_address
@@ -479,21 +484,20 @@ register_validator_direct() {
 
 # ------------------ 主菜单 ------------------
 main_menu() {
-    get_global_config  # 全局输入一次
     while true; do
         clear
         echo "========================================"
         echo " Aztec 节点管理 $SCRIPT_VERSION"
         echo "========================================"
-        echo "1. 安装/启动节点 (兼容2.1.2)"
+        echo "1. 安装/启动节点 (兼容2.1.2) - 会提示输入 RPC/PK"
         echo "2. 查看日志/状态"
         echo "3. 更新/重启 (pull 2.1.2)"
         echo "4. 性能监控"
         echo "5. 停止节点"
-        echo "6. 注册验证者 (手动模板)"
+        echo "6. 注册验证者 (手动模板) - 会提示输入 RPC/PK"
         echo "7. 退出"
         echo "========================================"
-        echo "提示: 2.1.2需rejoin！已airdrop 200k STAKE。全局 RPC/PK 已设。"
+        echo "提示: 2.1.2需rejoin！已airdrop 200k STAKE。"
         echo "========================================"
         read -p "选择 (1-7): " choice
         case $choice in
