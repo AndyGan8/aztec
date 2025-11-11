@@ -2,11 +2,12 @@
 set -euo pipefail
 
 # ==================================================
-# Aztec 节点管理脚本（优化版 v3.4）
-# 优化点（修复 fee-recipient 错误）：
-# - fee-recipient 默认使用零 Aztec 地址 (0x000...000, 64 hex)，避免 ETH 地址无效
-# - 添加 64 hex 验证；生成后提示编辑 keystore
-# - 兼容2.1.2，助记词支持保持
+# Aztec 节点管理脚本（优化版 v3.6）
+# 优化点：
+# - 私钥输入不隐藏（read -p，无 -s），方便调试
+# - 选项6 手动注册模板
+# - 全局 RPC/PK 输入，避免重复
+# - 兼容2.1.2，零Aztec地址默认
 # ==================================================
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -14,7 +15,7 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-SCRIPT_VERSION="v3.4 (2025-11-11, 兼容2.1.2)"
+SCRIPT_VERSION="v3.6 (2025-11-11, 兼容2.1.2)"
 
 # ------------------ 可配置项 ------------------
 AZTEC_DIR="/root/aztec-sequencer"
@@ -30,15 +31,45 @@ DEFAULT_KEYSTORE="$HOME/.aztec/keystore/key1.json"
 ZERO_AZTEC_ADDR="0x0000000000000000000000000000000000000000000000000000000000000000"
 PUBLISHER_GUIDE="https://docs.aztec.network/the_aztec_network/setup/sequencer_management#setting-up-a-publisher"
 
-# RPC 默认值从环境变量读取，提示中不显示具体值
-# export DEFAULT_ETH_RPC="https://rpc.sepolia.org"
-# export DEFAULT_CONS_RPC="https://ethereum-sepolia-beacon-api.publicnode.com"
+# 全局变量（从环境变量或输入）
+GLOBAL_ETH_RPC="${DEFAULT_ETH_RPC:-}"
+GLOBAL_CONS_RPC="${DEFAULT_CONS_RPC:-}"
+GLOBAL_FUNDING_PRIVATE_KEY=""
 
 # ------------------ 输出样式 ------------------
 print_info() { echo -e "\033[1;34m[INFO]\033[0m $1"; }
 print_success() { echo -e "\033[1;32m[SUCCESS]\033[0m $1"; }
 print_error() { echo -e "\033[1;31m[ERROR]\033[0m $1"; }
 print_warning() { echo -e "\033[1;33m[WARNING]\033[0m $1"; }
+
+# ------------------ 全局输入配置 ------------------
+get_global_config() {
+    if [[ -z "$GLOBAL_ETH_RPC" ]]; then
+        read -p "L1 RPC（回车使用环境变量 DEFAULT_ETH_RPC，如未设置则必须输入）: " input_eth_rpc
+        GLOBAL_ETH_RPC=${input_eth_rpc:-${DEFAULT_ETH_RPC:-}}
+        if [[ -z "$GLOBAL_ETH_RPC" ]]; then
+            print_error "L1 RPC 未提供。请设置环境变量或输入。"
+            exit 1
+        fi
+    fi
+    if [[ -z "$GLOBAL_CONS_RPC" ]]; then
+        read -p "Beacon/Consensus RPC（回车使用环境变量 DEFAULT_CONS_RPC，如未设置则必须输入）: " input_cons_rpc
+        GLOBAL_CONS_RPC=${input_cons_rpc:-${DEFAULT_CONS_RPC:-}}
+        if [[ -z "$GLOBAL_CONS_RPC" ]]; then
+            print_error "Consensus RPC 未提供。请设置环境变量或输入。"
+            exit 1
+        fi
+    fi
+    if [[ -z "$GLOBAL_FUNDING_PRIVATE_KEY" ]]; then
+        read -p "Funding 私钥 (以 0x 开头): " input_funding_pk  # 不隐藏输入
+        if [[ -z "$input_funding_pk" || ! "$input_funding_pk" =~ ^0x[a-fA-F0-9]{64}$ ]]; then
+            print_error "Funding 私钥格式无效（需 0x + 64 位 hex）"
+            exit 1
+        fi
+        GLOBAL_FUNDING_PRIVATE_KEY="$input_funding_pk"
+    fi
+    print_success "全局配置加载: RPC=$GLOBAL_ETH_RPC, Funding PK=OK"
+}
 
 # ------------------ 环境检查 ------------------
 check_environment() {
@@ -85,7 +116,6 @@ generate_address_from_private_key() {
 }
 
 # ------------------ 检查 STK 授权 ------------------
-# 返回 hex string（0x...）
 check_stk_allowance() {
     local rpc_url=$1
     local funding_address=$2
@@ -128,7 +158,6 @@ send_stk_approve() {
             return 1
         fi
     else
-        # 备用解析（如果非 JSON 输出）
         local grep_status=$(echo "$approve_tx" | grep -i "status" | head -1 | sed -E 's/.*status[^0-9]*([0-9x]+).*/\1/' | tr -d ' ')
         local grep_hash=$(echo "$approve_tx" | grep -i "transactionHash\|0x[0-9a-f]\{64\}" | head -1 | sed -E 's/.*(0x[0-9a-f]{64}).*/\1/')
         if [[ "$grep_status" == "1" || "$grep_status" == "0x1" ]]; then
@@ -177,40 +206,6 @@ install_and_start_node() {
         read -p "按任意键继续..."
         return 1
     fi
-
-    local DEFAULT_ETH_RPC_ENV=${DEFAULT_ETH_RPC:-}
-    local DEFAULT_CONS_RPC_ENV=${DEFAULT_CONS_RPC:-}
-
-    read -p "L1 RPC（回车使用环境变量 DEFAULT_ETH_RPC，如未设置则必须输入）: " ETH_RPC
-    ETH_RPC=${ETH_RPC:-$DEFAULT_ETH_RPC_ENV}
-    if [[ -z "$ETH_RPC" ]]; then
-        print_error "L1 RPC 未提供。请设置环境变量 DEFAULT_ETH_RPC 或输入。"
-        read -p "按任意键继续..."
-        return 1
-    fi
-
-    read -p "Beacon/Consensus RPC（回车使用环境变量 DEFAULT_CONS_RPC，如未设置则必须输入）: " CONS_RPC
-    CONS_RPC=${CONS_RPC:-$DEFAULT_CONS_RPC_ENV}
-    if [[ -z "$CONS_RPC" ]]; then
-        print_error "Consensus RPC 未提供。请设置环境变量 DEFAULT_CONS_RPC 或输入。"
-        read -p "按任意键继续..."
-        return 1
-    fi
-
-    read -sp "Funding 私钥 (以 0x 开头): " FUNDING_PRIVATE_KEY
-    echo
-    if [[ -z "$FUNDING_PRIVATE_KEY" || ! "$FUNDING_PRIVATE_KEY" =~ ^0x[a-fA-F0-9]{64}$ ]]; then
-        print_error "Funding 私钥格式无效（需 0x + 64 位 hex）"
-        read -p "按任意键继续..."
-        return 1
-    fi
-
-    local funding_address
-    funding_address=$(generate_address_from_private_key "$FUNDING_PRIVATE_KEY") || {
-        read -p "按任意键继续..."
-        return 1
-    }
-    print_info "Funding 地址: $funding_address (应已airdrop 200k STAKE)"
 
     echo
     echo "密钥模式：1. 新生成  2. 加载 keystore"
@@ -273,8 +268,8 @@ install_and_start_node() {
     # 生成 .env
     cat > "$AZTEC_DIR/.env" << EOF
 LOG_LEVEL=debug
-ETHEREUM_HOSTS=$ETH_RPC
-L1_CONSENSUS_HOST_URLS=$CONS_RPC
+ETHEREUM_HOSTS=$GLOBAL_ETH_RPC
+L1_CONSENSUS_HOST_URLS=$GLOBAL_CONS_RPC
 P2P_IP=$public_ip
 P2P_PORT=40400
 AZTEC_PORT=8080
@@ -302,8 +297,8 @@ services:
       KEY_STORE_DIRECTORY: /var/lib/keystore
       DATA_DIRECTORY: /var/lib/data
       LOG_LEVEL: debug
-      ETHEREUM_HOSTS: $ETH_RPC
-      L1_CONSENSUS_HOST_URLS: $CONS_RPC
+      ETHEREUM_HOSTS: $GLOBAL_ETH_RPC
+      L1_CONSENSUS_HOST_URLS: $GLOBAL_CONS_RPC
       P2P_IP: $public_ip
       P2P_PORT: 40400
       AZTEC_PORT: 8080
@@ -323,7 +318,7 @@ EOF
     print_info "启动容器..."
     cd "$AZTEC_DIR"
     docker compose up -d || { print_error "docker 启动失败"; read -p "按任意键继续..."; return 1; }
-    sleep 10  # 稍长等待新版初始化
+    sleep 10
     docker logs aztec-sequencer --tail 20 || true
 
     if curl -s --max-time 5 http://localhost:8080/status >/dev/null 2>&1; then
@@ -406,63 +401,40 @@ monitor_performance() {
 # ------------------ 手动注册验证者 ------------------
 register_validator_direct() {
     clear
-    print_info "验证者注册（手动，兼容2.1.2 rejoin）"
+    print_info "验证者注册（手动模式，兼容2.1.2 rejoin）"
     if ! check_environment; then
         print_error "环境检查失败"
         read -p "按任意键继续..."
         return 1
     fi
 
-    local DEFAULT_ETH_RPC_ENV=${DEFAULT_ETH_RPC:-}
-
-    read -p "L1 RPC（回车使用环境变量 DEFAULT_ETH_RPC，如未设置则必须输入）: " ETH_RPC
-    ETH_RPC=${ETH_RPC:-$DEFAULT_ETH_RPC_ENV}
-    if [[ -z "$ETH_RPC" ]]; then
-        print_error "L1 RPC 未提供"
-        read -p "按任意键继续..."
-        return 1
-    fi
-
-    read -sp "Funding 私钥 (0x...): " FUNDING_PRIVATE_KEY
-    echo
-    if [[ -z "$FUNDING_PRIVATE_KEY" || ! "$FUNDING_PRIVATE_KEY" =~ ^0x[a-fA-F0-9]{64}$ ]]; then
-        print_error "Funding 私钥格式错误"
-        read -p "按任意键继续..."
-        return 1
-    fi
-
-    read -sp "BLS 私钥 (0x...): " BLS_SECRET_KEY
-    echo
-    if [[ -z "$BLS_SECRET_KEY" || ! "$BLS_SECRET_KEY" =~ ^0x[a-fA-F0-9]{64,128}$ ]]; then
-        print_error "BLS 私钥格式错误"
-        read -p "按任意键继续..."
-        return 1
-    fi
-
+    local eth_rpc="$GLOBAL_ETH_RPC"
+    local funding_private_key="$GLOBAL_FUNDING_PRIVATE_KEY"
     local funding_address
-    funding_address=$(generate_address_from_private_key "$FUNDING_PRIVATE_KEY") || {
+    funding_address=$(generate_address_from_private_key "$funding_private_key") || {
         read -p "按任意键继续..."
         return 1
     }
     print_info "Funding 地址: $funding_address"
 
-    # 如果 keystore 存在，从中读取 attester/withdrawer
-    local ATTESTER WITHDRAWER keystore_path
-    if [[ -f "$KEY_DIR/key1.json" ]]; then
-        keystore_path="$KEY_DIR/key1.json"
-        ATTESTER=$(generate_address_from_private_key "$(jq -r '.validators[0].attester.eth' "$keystore_path")") || ATTESTER="0x0000000000000000000000000000000000000000"
-        WITHDRAWER="$ATTESTER"  # 默认相同，可自定义
-        print_info "使用 keystore 中的 attester: $ATTESTER"
-    else
-        # 回退到硬编码（优化后可移除）
-        ATTESTER="0x188df4682a70262bdb316b02c56b31eb53e7c0cb"
-        WITHDRAWER="$ATTESTER"
-        print_warning "keystore 未找到，使用默认 attester: $ATTESTER"
+    # 检查 keystore 和提取值
+    if [[ ! -f "$KEY_DIR/key1.json" ]]; then
+        print_error "keystore 未找到 ($KEY_DIR/key1.json)，请先运行选项1生成"
+        read -p "按任意键继续..."
+        return 1
     fi
+    local attester_eth_pk bls_secret_key attester_addr
+    attester_eth_pk=$(jq -r '.validators[0].attester.eth' "$KEY_DIR/key1.json") || { print_error "无法读取 ETH 私钥"; return 1; }
+    bls_secret_key=$(jq -r '.validators[0].attester.bls' "$KEY_DIR/key1.json") || { print_error "无法读取 BLS 私钥"; return 1; }
+    attester_addr=$(generate_address_from_private_key "$attester_eth_pk") || { print_error "无法生成 attester 地址"; return 1; }
+    local withdrawer_addr="$attester_addr"  # 默认相同
 
+    print_info "从 keystore 提取: Attester=$attester_addr, BLS PK=OK"
+
+    # 检查授权
     print_info "检查 STK 授权..."
     local allowance_hex allowance_dec
-    allowance_hex=$(check_stk_allowance "$ETH_RPC" "$funding_address") || {
+    allowance_hex=$(check_stk_allowance "$eth_rpc" "$funding_address") || {
         read -p "按任意键继续..."
         return 1
     }
@@ -473,7 +445,7 @@ register_validator_direct() {
 
     if [ "$allowance_dec" -lt "$STAKE_AMOUNT" ]; then
         print_warning "授权不足，尝试发送 approve..."
-        if ! send_stk_approve "$ETH_RPC" "$FUNDING_PRIVATE_KEY"; then
+        if ! send_stk_approve "$eth_rpc" "$funding_private_key"; then
             print_error "approve 失败，请手动检查或重试"
             read -p "按任意键继续..."
             return 1
@@ -482,34 +454,32 @@ register_validator_direct() {
         print_success "授权充足"
     fi
 
-    print_info "注册参数："
-    echo "  Attester: $ATTESTER"
-    echo "  Withdrawer: $WITHDRAWER"
-    echo "  Rollup: $ROLLUP_CONTRACT (新合约)"
-    read -p "确认执行注册？按 Enter 继续或 Ctrl+C 取消..."
+    # 显示手动命令模板
+    print_info "复制以下命令运行（替换为你的值，如果需要自定义 withdrawer）："
+    echo ""
+    echo "aztec add-l1-validator \\"
+    echo "  --l1-rpc-urls \"$eth_rpc\" \\"
+    echo "  --network testnet \\"
+    echo "  --private-key \"$funding_private_key\" \\"
+    echo "  --attester \"$attester_addr\" \\"
+    echo "  --withdrawer \"$withdrawer_addr\" \\"
+    echo "  --bls-secret-key \"$bls_secret_key\" \\"
+    echo "  --rollup $ROLLUP_CONTRACT"
+    echo ""
+    print_warning "运行前确认：Funding PK 用于支付 stake，新 attester 用于验证。"
+    read -p "运行命令后，按 Enter 继续（检查 Tx）..."
 
-    if aztec add-l1-validator \
-        --l1-rpc-urls "$ETH_RPC" \
-        --network testnet \
-        --private-key "$FUNDING_PRIVATE_KEY" \
-        --attester "$ATTESTER" \
-        --withdrawer "$WITHDRAWER" \
-        --bls-secret-key "$BLS_SECRET_KEY" \
-        --rollup "$ROLLUP_CONTRACT"; then
-        print_success "注册成功！(rejoin testnet) 可在 dashtec/区块浏览器查看"
-        echo "Dashtec: $DASHTEC_URL/validator/$ATTESTER"
-        echo ""
-        print_warning "2.1.2新要求：设置Publisher或为Attester ($ATTESTER) fund sepETH！"
-        print_info "指南: $PUBLISHER_GUIDE"
-        echo "用funding私钥转ETH到Attester: cast send $ATTESTER --value 0.1ether --private-key $FUNDING_PRIVATE_KEY --rpc-url $ETH_RPC"
-    else
-        print_error "注册失败，请查看 aztec CLI 输出"
-    fi
+    print_success "注册命令已生成！可在 dashtec 查看: $DASHTEC_URL/validator/$attester_addr"
+    echo ""
+    print_warning "2.1.2新要求：设置Publisher或为Attester ($attester_addr) fund sepETH！"
+    print_info "指南: $PUBLISHER_GUIDE"
+    echo "转ETH命令: cast send $attester_addr --value 0.1ether --private-key $funding_private_key --rpc-url $eth_rpc"
     read -p "按任意键返回主菜单..."
 }
 
 # ------------------ 主菜单 ------------------
 main_menu() {
+    get_global_config  # 全局输入一次
     while true; do
         clear
         echo "========================================"
@@ -520,10 +490,10 @@ main_menu() {
         echo "3. 更新/重启 (pull 2.1.2)"
         echo "4. 性能监控"
         echo "5. 停止节点"
-        echo "6. 注册验证者 (rejoin testnet)"
+        echo "6. 注册验证者 (手动模板)"
         echo "7. 退出"
         echo "========================================"
-        echo "提示: 2.1.2需rejoin！已airdrop 200k STAKE。RPC默认用环境变量。"
+        echo "提示: 2.1.2需rejoin！已airdrop 200k STAKE。全局 RPC/PK 已设。"
         echo "========================================"
         read -p "选择 (1-7): " choice
         case $choice in
